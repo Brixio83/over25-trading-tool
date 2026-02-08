@@ -20,11 +20,11 @@ st.title("⚽ Over 2.5 Trading Tool")
 
 st.caption("Pre-match ➜ Stop-loss live controllato")
 
-=========================
+
 
 API KEY
 
-=========================
+
 
 api_key = st.secrets.get("THE_ODDS_API_KEY", "")
 
@@ -34,11 +34,11 @@ st.error("❌ API KEY non trovata in secrets.toml")
 
 st.stop()
 
-=========================
+
 
 PARAMETRI (DEFAULT BUONI)
 
-=========================
+
 
 quota_min = 1.85
 
@@ -66,11 +66,10 @@ commission = commission_pct / 100
 
 st.divider()
 
-=========================
+
 
 PREMATCH
 
-=========================
 
 st.header("📋 Partite Consigliate")
 
@@ -122,11 +121,10 @@ st.success(f"Over 2.5 selezionato @ {B}")
 
 st.divider()
 
-=========================
 
 LIVE / MOBILE MODE
 
-=========================
+
 
 st.header("📱 LIVE – DECISIONE")
 
