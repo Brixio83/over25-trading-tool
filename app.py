@@ -23,8 +23,8 @@ if not api_key:
 # =========================
 # PARAMETRI (DEFAULT BUONI)
 # =========================
-quota_min = 1.80
-quota_max = 2.10
+quota_min = 1.50
+quota_max = 3
 odds_rise_pct = 25
 commission_pct = 5.0
 
