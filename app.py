@@ -1,5 +1,5 @@
 import streamlit as st
-from live_odds import get_odds_totals, extract_over25
+from live_odds import get_odds_totals_v2, extract_over25
 
 st.set_page_config(page_title="Over 2.5 Trading Tool", layout="centered")
 
@@ -49,7 +49,7 @@ if st.button("🔄 CARICA PARTITE", use_container_width=True):
     metas = []
 
     for name, key in sports:
-        events, meta = get_odds_totals(api_key, sport_key=key, regions=regions)
+        events, meta = get_odds_totals_v2(api_key, sport_key=key, regions=regions)
         payload_all.extend(events)
         meta["league"] = name
         metas.append(meta)
@@ -64,7 +64,6 @@ if payload is None:
     st.info("Premi **CARICA PARTITE** per caricare gli eventi di Serie A e Serie B.")
     st.stop()
 
-# Debug chiaro (così capisci se è API o eventi 0)
 with st.expander("🛠️ Debug API (apri se non vedi partite)", expanded=False):
     for m in metas:
         st.write(
@@ -75,7 +74,7 @@ if not payload:
     st.warning("Nessun evento disponibile (API ha restituito lista vuota). Prova a cambiare regione (uk/us) o riprova più tardi.")
     st.stop()
 
-# Lista: tutte le partite con Over 2.5 disponibile (nessun filtro quota)
+# Lista partite: tutte quelle con Over 2.5 disponibile (nessun filtro quota)
 matches = []
 for ev in payload:
     over = extract_over25(ev)
@@ -91,7 +90,6 @@ if not matches:
     st.warning("Ci sono eventi, ma nessuno ha il mercato Over 2.5 disponibile nei dati (totals). Riprova più tardi o cambia regione.")
     st.stop()
 
-# Ordina per quota per comodità
 matches.sort(key=lambda x: x["price"])
 
 options = [f"{m['label']} | Over 2.5 @ {m['price']:.2f} ({m['book']})" for m in matches]
