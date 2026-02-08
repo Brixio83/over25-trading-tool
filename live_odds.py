@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 BASE_URL = "https://api.the-odds-api.com/v4"
 
 
-def get_odds_totals(
+def get_odds_totals_v2(
     api_key: str,
     sport_key: str,
     regions: str = "eu",
@@ -13,9 +13,9 @@ def get_odds_totals(
     """
     Scarica quote mercato 'totals' (Over/Under) per sport_key.
 
-    Ritorna:
-      - events: lista eventi (può essere vuota)
-      - meta: dict debug (ok, status_code, message, url, count)
+    Ritorna SEMPRE:
+      - events: lista eventi (anche vuota)
+      - meta: debug dict (ok, status_code, message, url, count)
     """
     url = f"{BASE_URL}/sports/{sport_key}/odds"
     params = {
