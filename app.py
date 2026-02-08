@@ -1,3 +1,4 @@
+
 import streamlit as st
 from live_odds import get_odds_totals, extract_over25
 
@@ -11,13 +12,14 @@ st.caption("Pre-match ➜ Stop-loss live controllato")
 # =========================
 api_key = st.secrets.get("THE_ODDS_API_KEY", "")
 if not api_key:
-    st.error("❌ API KEY non trovata in Secrets (Streamlit Cloud).")
+    st.error("❌ API KEY non trovata nei Secrets di Streamlit Cloud.")
     st.stop()
 
 # =========================
-# PARAMETRI (DEFAULT)
+# PARAMETRI
 # =========================
 st.subheader("⚙️ Parametri")
+
 quota_min = st.number_input("Quota MIN Over 2.5 (pre-match)", min_value=1.01, value=1.85, step=0.01)
 quota_max = st.number_input("Quota MAX Over 2.5 (pre-match)", min_value=1.01, value=2.10, step=0.01)
 odds_rise_pct = st.number_input("Stop: quota sale del (%)", min_value=1, value=25, step=1)
@@ -29,10 +31,11 @@ commission = commission_pct / 100.0
 st.divider()
 
 # =========================
-# PREMATCH (CARICA PARTITE)
+# PREMATCH - CARICA PARTITE
 # =========================
 st.header("📋 Partite Consigliate")
 
+# inizializza session state
 if "payload" not in st.session_state:
     st.session_state["payload"] = None
 
@@ -50,6 +53,7 @@ if st.button("🔄 CARICA PARTITE", use_container_width=True):
     st.session_state["payload"] = payload_all
 
 payload = st.session_state.get("payload")
+
 if payload is None:
     st.info("Premi 'CARICA PARTITE' per cercare le partite disponibili.")
     st.stop()
@@ -57,17 +61,17 @@ if payload is None:
 good_matches = []
 for ev in payload:
     over = extract_over25(ev)
-    if over and quota_min <= over["price"] <= quota_max:
+    if over and quota_min <= float(over["price"]) <= quota_max:
         good_matches.append(
             {
                 "label": f"{ev.get('home_team', 'Home')} vs {ev.get('away_team', 'Away')}",
-                "price": over["price"],
-                "book": over["book"],
+                "price": float(over["price"]),
+                "book": over.get("book", ""),
             }
         )
 
 if not good_matches:
-    st.info("Nessuna partita interessante al momento (prova ad allargare le quote o riprovare più tardi).")
+    st.info("Nessuna partita interessante al momento (prova ad allargare le quote o riprova più tardi).")
     st.stop()
 
 options = [f"{m['label']} | Over 2.5 @ {m['price']:.2f} ({m['book']})" for m in good_matches]
@@ -80,7 +84,7 @@ st.success(f"✅ Selezionato: Over 2.5 @ {B:.2f} ({sel['book']})")
 st.divider()
 
 # =========================
-# LIVE / STOP-LOSS
+# LIVE - STOP LOSS
 # =========================
 st.header("📱 LIVE – Decisione")
 
@@ -92,7 +96,7 @@ current_odds = st.number_input(
 )
 
 odds_trigger = B * (1 + odds_rise_pct / 100.0)
-st.write(f"🛑 Quota STOP: **{odds_trigger:.2f}** (se la quota live arriva qui, copri)")
+st.write(f"🛑 Quota STOP: **{odds_trigger:.2f}**")
 
 def hedge_lay_equal(S: float, Bk: float, L: float, c: float):
     denom = L - c
@@ -121,9 +125,8 @@ if current_odds >= odds_trigger:
     st.info(f"💣 Liability: **{liability:.2f} €**")
 
     st.markdown("### 📊 Esiti finali stimati")
-    st.warning(f"⚠️ Se esce Over 2.5: **{pl_over:.2f} €**")
-    st.warning(f"⚠️ Se NON esce Over 2.5: **{pl_under:.2f} €**")
+    st.warning(f"Se esce Over 2.5: **{pl_over:.2f} €**")
+    st.warning(f"Se NON esce Over 2.5: **{pl_under:.2f} €**")
 else:
     st.success("🟢 Mantieni posizione")
     st.caption("La quota live non ha ancora raggiunto lo stop.")
-
