@@ -46,9 +46,19 @@ st.divider()
 st.header("📋 Partite Consigliate")
 
 if st.button("🔄 CARICA PARTITE", use_container_width=True):
-    st.session_state.payload = get_odds_totals(api_key)
+    payload = []
 
-payload = st.session_state.get("payload", [])
+    sports = [
+        "soccer_italy_serie_a",
+        "soccer_italy_serie_b",
+        "soccer_epl",
+        "soccer_spain_la_liga"
+    ]
+
+    for sport in sports:
+        payload.extend(get_odds_totals(api_key, sport_key=sport))
+
+    st.session_state.payload = payload
 
 good_matches = []
 
