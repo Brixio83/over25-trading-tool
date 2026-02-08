@@ -1,26 +1,21 @@
 import requests
 from typing import Any, Dict, List, Optional, Tuple
 
-
 BASE_URL = "https://api.the-odds-api.com/v4"
 
 
 def get_odds_totals(
     api_key: str,
-    sport_key: str = "soccer",
+    sport_key: str,
     regions: str = "eu",
     odds_format: str = "decimal",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Scarica le quote per il mercato 'totals' (Over/Under) per uno sport/campionato.
+    Scarica quote mercato 'totals' (Over/Under) per sport_key.
 
     Ritorna:
       - events: lista eventi (può essere vuota)
-      - meta: dict con debug info (status_code, message, url)
-
-    NOTE:
-    - sport_key="soccer" tende a dare più eventi rispetto a una singola lega.
-    - regions può essere "eu", "uk", "us".
+      - meta: dict debug (ok, status_code, message, url, count)
     """
     url = f"{BASE_URL}/sports/{sport_key}/odds"
     params = {
@@ -40,16 +35,15 @@ def get_odds_totals(
             "url": url,
             "sport_key": sport_key,
             "regions": regions,
+            "count": 0,
         }
 
-    # Prova a leggere json (anche in caso di errore)
     try:
         data = r.json()
     except Exception:
         data = None
 
     if r.status_code != 200:
-        # The Odds API di solito ritorna {"message": "..."} sugli errori
         msg = ""
         if isinstance(data, dict):
             msg = data.get("message", "")
@@ -62,9 +56,9 @@ def get_odds_totals(
             "url": r.url,
             "sport_key": sport_key,
             "regions": regions,
+            "count": 0,
         }
 
-    # Status 200
     if not isinstance(data, list):
         return [], {
             "ok": False,
@@ -73,6 +67,7 @@ def get_odds_totals(
             "url": r.url,
             "sport_key": sport_key,
             "regions": regions,
+            "count": 0,
         }
 
     return data, {
@@ -86,38 +81,22 @@ def get_odds_totals(
     }
 
 
-def build_event_list(payload: List[Dict[str, Any]]):
-    labels = []
-    obj_map = {}
-
-    for ev in payload:
-        home = ev.get("home_team", "Home")
-        away = ev.get("away_team", "Away")
-        label = f"{home} vs {away}"
-        labels.append(label)
-        obj_map[label] = ev
-
-    return labels, obj_map
-
-
 def extract_over25(event_obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Ritorna Over 2.5 se presente:
-    {
-      "price": quota,
-      "book": bookmaker
-    }
+    {"price": quota, "book": bookmaker}
     """
     for bookmaker in event_obj.get("bookmakers", []) or []:
         book = bookmaker.get("title", "")
         for market in bookmaker.get("markets", []) or []:
-            if market.get("key") == "totals":
-                for outcome in market.get("outcomes", []) or []:
-                    name = str(outcome.get("name", "")).lower()
-                    point = outcome.get("point", None)
-                    price = outcome.get("price", None)
+            if market.get("key") != "totals":
+                continue
+            for outcome in market.get("outcomes", []) or []:
+                name = str(outcome.get("name", "")).lower()
+                point = outcome.get("point", None)
+                price = outcome.get("price", None)
 
-                    if name == "over" and point == 2.5 and price is not None:
-                        return {"price": float(price), "book": book}
+                if name == "over" and point == 2.5 and price is not None:
+                    return {"price": float(price), "book": book}
 
     return None
