@@ -120,4 +120,4 @@ if current_odds >= odds_trigger:
 else:
     st.success("🟢 Mantieni posizione")
     st.caption("La quota non ha ancora raggiunto lo stop.")
-#restart
+
