@@ -6,7 +6,7 @@ from live_odds import get_odds_totals, build_event_list, extract_over25
 
 CONFIG
 
-=========================
+
 
 st.set_page_config(
 
