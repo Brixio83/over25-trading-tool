@@ -3,166 +3,259 @@ import streamlit as st
 # =========================
 # CONFIG
 # =========================
-st.set_page_config(page_title="Over 2.5 Trading Tool (Manual)", layout="centered")
+st.set_page_config(page_title="Trading Tool Semplice", layout="centered")
 
-st.title("⚽ Over 2.5 Trading Tool — Manuale (NO API)")
-st.caption("Inserisci tu partita, quota di ingresso e quota live (Betflag). Calcolo stop e copertura.")
-
-st.divider()
-
-# =========================
-# INPUT MANUALI
-# =========================
-st.header("📝 Dati partita e ingresso (manuale)")
-
-match_name = st.text_input("Partita (es. Juventus–Lazio)", value=st.session_state.get("match_name", ""))
-st.session_state["match_name"] = match_name
-
-colA, colB = st.columns(2)
-
-with colA:
-    stake_back = st.number_input("Stake BACK (€)", min_value=1.0, max_value=5000.0, value=float(st.session_state.get("stake_back", 10.0)), step=1.0)
-with colB:
-    back_odds = st.number_input("Quota BACK reale (ingresso su Betflag)", min_value=1.01, max_value=100.0, value=float(st.session_state.get("back_odds", 2.12)), step=0.01)
-
-st.session_state["stake_back"] = float(stake_back)
-st.session_state["back_odds"] = float(back_odds)
-
-colC, colD = st.columns(2)
-
-with colC:
-    commission_pct = st.number_input("Commissione Exchange (%)", min_value=0.0, max_value=20.0, value=float(st.session_state.get("commission_pct", 5.0)), step=0.5)
-with colD:
-    stop_pct = st.number_input("Stop (%) aumento quota", min_value=1.0, max_value=300.0, value=float(st.session_state.get("stop_pct", 25.0)), step=1.0)
-
-st.session_state["commission_pct"] = float(commission_pct)
-st.session_state["stop_pct"] = float(stop_pct)
-
-c = commission_pct / 100.0
-stop_odds = back_odds * (1.0 + stop_pct / 100.0)
-
-st.info(f"📌 Stop quota (solo riferimento): **{stop_odds:.2f}**  (da quota ingresso {back_odds:.2f} con stop {stop_pct:.0f}%)")
+st.title("⚽ Trading Tool Semplice (NO API)")
+st.caption("Tu inserisci ingresso e perdita massima. L'app ti prepara la **quota stop** e **quanto bancare**.")
 
 st.divider()
 
 # =========================
-# LIVE INPUT
+# UTILS
 # =========================
-st.header("📱 LIVE (manuale)")
+def nome_mercato(key: str) -> str:
+    return {
+        "over15": "Over 1.5",
+        "over25": "Over 2.5",
+        "goal": "GOAL (Entrambe segnano - Sì)",
+        "nogoal": "NO GOAL (Entrambe segnano - No)",
+    }.get(key, key)
 
-lay_odds = st.number_input(
-    "Quota LIVE attuale (su Betflag) — Over 2.5",
-    min_value=1.01,
-    max_value=200.0,
-    value=float(st.session_state.get("lay_odds", stop_odds)),
+def calcola_bancata_per_perdita_massima(puntata_ingresso: float, perdita_massima: float, commissione: float) -> float:
+    """
+    Obiettivo: se la tua giocata perde, vuoi perdere ~perdita_massima.
+
+    Se la tua giocata perde:
+      risultato = -puntata_ingresso + bancata*(1-commissione)
+    Impongo:
+      risultato = -perdita_massima
+    => bancata*(1-commissione) = puntata_ingresso - perdita_massima
+    => bancata = (puntata_ingresso - perdita_massima) / (1-commissione)
+    """
+    denom = 1.0 - commissione
+    if denom <= 0:
+        return 0.0
+    x = (puntata_ingresso - perdita_massima) / denom
+    return max(0.0, x)
+
+def stima_esiti(puntata_ingresso: float, quota_ingresso: float, quota_stop: float, commissione: float, bancata: float):
+    """
+    Scenario A: la tua giocata vince (es. Over esce / Goal esce / NoGoal esce)
+      - vinci dal BACK: puntata*(quota-1)
+      - perdi dalla LAY: liability = bancata*(quota_stop-1)
+
+    Scenario B: la tua giocata perde
+      - perdi il BACK: -puntata
+      - vinci la LAY netto commissione: + bancata*(1-commissione)
+    """
+    vincita_back = puntata_ingresso * (quota_ingresso - 1.0)
+    liability = bancata * (quota_stop - 1.0)
+
+    esito_se_vinci = vincita_back - liability
+    esito_se_perdi = -puntata_ingresso + bancata * (1.0 - commissione)
+
+    return esito_se_vinci, esito_se_perdi, liability
+
+def fmt_euro(x: float) -> str:
+    return f"{x:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+def fmt_q(x: float) -> str:
+    return f"{x:.2f}".replace(".", ",")
+
+# =========================
+# DEFAULTS
+# =========================
+if "partita" not in st.session_state: st.session_state["partita"] = ""
+if "mercato" not in st.session_state: st.session_state["mercato"] = "over25"
+if "puntata_ingresso" not in st.session_state: st.session_state["puntata_ingresso"] = 10.0
+if "quota_ingresso" not in st.session_state: st.session_state["quota_ingresso"] = 2.12
+if "commissione_pct" not in st.session_state: st.session_state["commissione_pct"] = 5.0
+if "perdita_massima" not in st.session_state: st.session_state["perdita_massima"] = 4.0
+if "stop_custom_pct" not in st.session_state: st.session_state["stop_custom_pct"] = 35.0
+
+# =========================
+# INPUTS
+# =========================
+st.header("📝 Dati d’ingresso (semplici)")
+
+partita = st.text_input("Partita (opzionale)", value=st.session_state["partita"], placeholder="Es: Juventus - Lazio")
+st.session_state["partita"] = partita
+
+mercato = st.selectbox(
+    "Che cosa stai giocando?",
+    options=["over15", "over25", "goal", "nogoal"],
+    format_func=nome_mercato,
+    index=["over15","over25","goal","nogoal"].index(st.session_state["mercato"])
+)
+st.session_state["mercato"] = mercato
+
+c1, c2 = st.columns(2)
+with c1:
+    puntata_ingresso = st.number_input(
+        "Puntata d’ingresso (€)",
+        min_value=1.0, max_value=5000.0,
+        value=float(st.session_state["puntata_ingresso"]),
+        step=1.0
+    )
+with c2:
+    quota_ingresso = st.number_input(
+        "Quota d’ingresso (reale Betflag)",
+        min_value=1.01, max_value=200.0,
+        value=float(st.session_state["quota_ingresso"]),
+        step=0.01
+    )
+
+st.session_state["puntata_ingresso"] = float(puntata_ingresso)
+st.session_state["quota_ingresso"] = float(quota_ingresso)
+
+c3, c4 = st.columns(2)
+with c3:
+    commissione_pct = st.number_input(
+        "Commissione exchange (%)",
+        min_value=0.0, max_value=20.0,
+        value=float(st.session_state["commissione_pct"]),
+        step=0.5
+    )
+with c4:
+    perdita_massima = st.number_input(
+        "Perdita massima che accetto (€)",
+        min_value=0.0, max_value=float(puntata_ingresso),
+        value=float(st.session_state["perdita_massima"]),
+        step=0.5
+    )
+
+st.session_state["commissione_pct"] = float(commissione_pct)
+st.session_state["perdita_massima"] = float(perdita_massima)
+
+commissione = commissione_pct / 100.0
+
+st.divider()
+
+# =========================
+# OUTPUT PRINCIPALE (BANCATA)
+# =========================
+st.header("✅ Risultato principale (super semplice)")
+
+bancata = calcola_bancata_per_perdita_massima(puntata_ingresso, perdita_massima, commissione)
+
+# Card principale
+st.markdown(
+    f"""
+<div style="padding:14px;border-radius:14px;border:1px solid #2a2a2a;background:rgba(255,255,255,0.03);">
+  <div style="font-size:18px;font-weight:700;">🎯 Quanto bancare (per limitare la perdita)</div>
+  <div style="margin-top:8px;font-size:16px;">
+    Se vuoi perdere circa <b>{fmt_euro(perdita_massima)}</b> quando va male, devi bancare:
+  </div>
+  <div style="margin-top:10px;font-size:26px;font-weight:800;">
+    {fmt_euro(bancata)}
+  </div>
+  <div style="margin-top:6px;opacity:0.85;">
+    (questa cifra dipende da: puntata ingresso, perdita massima, commissione)
+  </div>
+</div>
+""",
+    unsafe_allow_html=True
+)
+
+st.caption("👉 Ora manca solo decidere **a che quota stop** vuoi uscire (25% / 35% / 50% o personalizzato).")
+
+st.divider()
+
+# =========================
+# STOP PRONTI + CUSTOM
+# =========================
+st.header("🛑 Quote STOP pronte (così ti prepari prima)")
+
+st.write("Scegli uno stop. Quando la quota LIVE su Betflag arriva a quella **Quota stop**, esegui la bancata calcolata sopra.")
+
+stop_levels = [25, 35, 50]
+
+rows = []
+for sp in stop_levels:
+    quota_stop = quota_ingresso * (1.0 + sp / 100.0)
+    es_vinci, es_perdi, liab = stima_esiti(puntata_ingresso, quota_ingresso, quota_stop, commissione, bancata)
+    rows.append({
+        "Stop (%)": f"+{sp}%",
+        "Quota stop": fmt_q(quota_stop),
+        "Banca": fmt_euro(bancata),
+        "Liability (rischio se VINCI)": fmt_euro(liab),
+        "Esito se VINCI": fmt_euro(es_vinci),
+        "Esito se PERDI": fmt_euro(es_perdi),
+    })
+
+st.dataframe(rows, use_container_width=True, hide_index=True)
+
+st.divider()
+
+st.subheader("✨ Stop personalizzato (se vuoi)")
+stop_custom_pct = st.slider(
+    "Scegli il tuo stop (%)",
+    min_value=0, max_value=150,
+    value=int(st.session_state["stop_custom_pct"]),
+    step=1
+)
+st.session_state["stop_custom_pct"] = float(stop_custom_pct)
+
+quota_stop_custom = quota_ingresso * (1.0 + stop_custom_pct / 100.0)
+es_vinci_c, es_perdi_c, liab_c = stima_esiti(puntata_ingresso, quota_ingresso, quota_stop_custom, commissione, bancata)
+
+st.markdown(
+    f"""
+<div style="padding:14px;border-radius:14px;border:1px solid #2a2a2a;background:rgba(255,255,255,0.03);">
+  <div style="font-size:18px;font-weight:700;">📌 Il tuo stop personalizzato</div>
+  <div style="margin-top:8px;">
+    <b>Quota stop:</b> <span style="font-size:20px;font-weight:800;">{fmt_q(quota_stop_custom)}</span>
+  </div>
+  <div style="margin-top:6px;">
+    Quando la quota LIVE arriva a <b>{fmt_q(quota_stop_custom)}</b>, banca <b>{fmt_euro(bancata)}</b>.
+  </div>
+  <div style="margin-top:10px;opacity:0.95;">
+    💣 Liability stimata: <b>{fmt_euro(liab_c)}</b><br/>
+    ✅ Se VINCI: <b>{fmt_euro(es_vinci_c)}</b><br/>
+    ❌ Se PERDI: <b>{fmt_euro(es_perdi_c)}</b>
+  </div>
+</div>
+""",
+    unsafe_allow_html=True
+)
+
+st.divider()
+
+# =========================
+# LIVE CHECK (OPZIONALE)
+# =========================
+st.header("📱 LIVE (opzionale): controlla se ci sei arrivato")
+
+st.caption("Qui puoi inserire la quota LIVE attuale solo per vedere subito: 'sei in stop' oppure no.")
+
+quota_live = st.number_input(
+    "Quota LIVE attuale (Betflag) — (opzionale)",
+    min_value=1.01, max_value=500.0,
+    value=float(quota_stop_custom),
     step=0.01
 )
-st.session_state["lay_odds"] = float(lay_odds)
 
-col1, col2 = st.columns(2)
-with col1:
-    cover_percent = st.radio("Copertura", [30, 60, 100], horizontal=True, index=2)
-with col2:
-    mode = st.radio("Modalità calcolo", ["Stop-loss (perdita max)", "Pareggio (chiudi tutto)"], index=0)
+if quota_live >= quota_stop_custom:
+    st.error("🛑 SEI IN STOP: quota live ≥ quota stop. Se vuoi rispettare il piano, banca adesso.")
+else:
+    st.success("🟢 Non sei ancora in stop. Aspetta (se questa è la tua regola).")
 
 st.divider()
 
 # =========================
-# FUNZIONI
+# RIEPILOGO SUPER CHIARO
 # =========================
-def hedge_equal_profit(stake: float, back: float, lay: float, comm: float) -> float | None:
-    # lay_stake = (stake * back) / (lay - comm)
-    denom = lay - comm
-    if denom <= 0:
-        return None
-    return (stake * back) / denom
+st.header("🧾 Riepilogo (da leggere al volo)")
 
-def hedge_stoploss_maxloss(stake: float, comm: float, max_loss: float) -> float | None:
-    # Se vuoi che nello scenario "NO OVER" (cioè perdi il back) la perdita massima sia max_loss:
-    # pl_no_over = -stake + lay_stake*(1-comm) = -max_loss
-    # lay_stake*(1-comm) = stake - max_loss
-    denom = 1 - comm
-    if denom <= 0:
-        return None
-    x = (stake - max_loss) / denom
-    return max(x, 0.0)
+st.write(f"**Partita:** {partita if partita else '—'}")
+st.write(f"**Mercato:** {nome_mercato(mercato)}")
+st.write(f"**Puntata d’ingresso:** {fmt_euro(puntata_ingresso)}")
+st.write(f"**Quota d’ingresso:** {fmt_q(quota_ingresso)}")
+st.write(f"**Perdita massima accettata:** {fmt_euro(perdita_massima)}")
+st.write(f"**Quanto bancare:** {fmt_euro(bancata)}")
+st.write(f"**Quota stop (personalizzata):** {fmt_q(quota_stop_custom)}")
 
-def pl_values(stake: float, back: float, lay: float, comm: float, lay_stake: float):
-    # Scenario OVER esce (Back vince, Lay perde):
-    pl_over = stake * (back - 1) - lay_stake * (lay - 1)
-    # Scenario OVER NON esce (Back perde, Lay vince meno commissione):
-    pl_no_over = -stake + lay_stake * (1 - comm)
-    liability = lay_stake * (lay - 1)
-    return pl_over, pl_no_over, liability
-
-# =========================
-# CALCOLO
-# =========================
-st.header("📊 Calcolo")
-
-# blocco sicurezza: se quota live non ha senso
-if lay_odds <= 1.01:
-    st.error("Quota LIVE non valida.")
-    st.stop()
-
-# Stop-loss: definisci perdita massima
-max_loss_default = float(st.session_state.get("max_loss", min(0.4 * stake_back, stake_back)))
-if mode == "Stop-loss (perdita max)":
-    max_loss = st.number_input("Perdita massima accettata (€)", min_value=0.0, max_value=float(stake_back), value=float(max_loss_default), step=1.0)
-    st.session_state["max_loss"] = float(max_loss)
-else:
-    max_loss = 0.0
-
-# Mostra allarme stop
-if lay_odds >= stop_odds:
-    st.error("🛑 STOP raggiunto/superato (quota live ≥ stop). Valuta uscita.")
-else:
-    st.success("🟢 Sotto lo stop (quota live < stop). In teoria puoi tenere.")
-
-# Bottone calcolo
-if st.button("CALCOLA ORA", use_container_width=True):
-    if stake_back <= 0:
-        st.error("Stake deve essere > 0")
-        st.stop()
-
-    if back_odds <= 1.01:
-        st.error("Quota ingresso non valida")
-        st.stop()
-
-    if mode == "Pareggio (chiudi tutto)":
-        lay_full = hedge_equal_profit(stake_back, back_odds, lay_odds, c)
-        if lay_full is None:
-            st.error("Errore: controlla quota live e commissione.")
-            st.stop()
-        lay_stake = lay_full * (cover_percent / 100.0)
-
-    else:
-        lay_full = hedge_stoploss_maxloss(stake_back, c, max_loss)
-        if lay_full is None:
-            st.error("Errore: controlla commissione.")
-            st.stop()
-        lay_stake = lay_full * (cover_percent / 100.0)
-
-    pl_over, pl_no_over, liability = pl_values(stake_back, back_odds, lay_odds, c, lay_stake)
-
-    st.subheader("✅ Risultato")
-    st.write(f"**Partita:** {match_name if match_name else '—'}")
-    st.write(f"**Ingresso (BACK):** {stake_back:.2f} € @ {back_odds:.2f}")
-    st.write(f"**Live (LAY odds):** {lay_odds:.2f}  |  **Commissione:** {commission_pct:.1f}%")
-    st.write(f"**Copertura:** {cover_percent}%  |  **Modalità:** {mode}")
-
-    st.success(f"👉 BANCA Over 2.5: **{lay_stake:.2f} €**")
-    st.info(f"💣 Liability (rischio se esce Over): **{liability:.2f} €**")
-
-    st.markdown("### 🔍 Esiti finali stimati")
-    st.warning(f"Se esce Over 2.5: **{pl_over:.2f} €**")
-    st.warning(f"Se NON esce Over 2.5: **{pl_no_over:.2f} €**")
-
-    # Protezione extra: avviso se liability supera lo stake (molti utenti lo trovano “troppo pesante”)
-    st.markdown("### 🚨 Avvisi")
-    if liability > stake_back:
-        st.error("⚠️ Liability maggiore dello stake: copertura pesante. Valuta cash-out o copertura % più bassa.")
-    elif abs(pl_no_over) > 0.5 * stake_back:
-        st.warning("⚠️ La perdita nello scenario negativo è alta rispetto allo stake.")
-    else:
-        st.success("🟢 Rischio ragionevole rispetto allo stake.")
+st.info(
+    "📌 Regola pratica: **Prima della partita** ti segni *Quota stop* e *Quanto bancare*. "
+    "In live guardi solo Betflag: quando la quota arriva a quella cifra, esegui."
+)
