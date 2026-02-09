@@ -347,4 +347,3 @@ st.info(
     "In live controlli Betflag: quando arriva in stop, esegui. "
     "Se invece vuoi uscire subito, usa **Uscita ADESSO**."
 )
-```0
