@@ -4,7 +4,10 @@ import requests
 import streamlit as st
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+import streamlit as st
 
+st.write("DEBUG: keys nei secrets →", st.secrets)
+st.write("DEBUG: API_FOOTBALL_KEY →", st.secrets.get("API_FOOTBALL_KEY"))
 # =========================
 # CONFIG
 # =========================
