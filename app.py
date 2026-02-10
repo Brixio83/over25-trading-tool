@@ -106,7 +106,20 @@ def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], tim
 # =============================
 # API-FOOTBALL (API-SPORTS)
 # =============================
+import streamlit as st
+import requests
 
+def api_get(url, params=None):
+    key = st.secrets.get("API_FOOTBALL_KEY", "")
+    headers = {"x-apisports-key": key}
+    r = requests.get(url, headers=headers, params=params, timeout=20)
+    return r
+
+# DEBUG: test API
+st.write("DEBUG: API_FOOTBALL_KEY presente?", bool(st.secrets.get("API_FOOTBALL_KEY")))
+test = api_get("https://v3.football.api-sports.io/status")
+st.write("DEBUG /status code:", test.status_code)
+st.write("DEBUG /status json:", test.json())
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def search_team(api_key: str, query: str) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/teams"
