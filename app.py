@@ -1,226 +1,428 @@
-import os
-import re
-import json
-import requests
 import streamlit as st
-from datetime import datetime, timezone
+import requests
+from datetime import datetime, timedelta, timezone
+import re
 
-# =========================
+# ----------------------------
 # CONFIG
-# =========================
+# ----------------------------
+st.set_page_config(page_title="Trading Tool PRO (Calcio)", layout="wide")
+
 API_BASE = "https://v3.football.api-sports.io"
+DEFAULT_LEAGUES = {
+    "Serie A (ID 135)": 135,
+    "Premier League (ID 39)": 39,
+    "LaLiga (ID 140)": 140,
+    "Bundesliga (ID 78)": 78,
+    "Ligue 1 (ID 61)": 61,
+}
 
-def get_api_key() -> str:
-    # Streamlit Cloud: st.secrets
-    if "API_FOOTBALL_KEY" in st.secrets:
-        return str(st.secrets["API_FOOTBALL_KEY"]).strip()
-    # Fallback locale
-    return os.getenv("API_FOOTBALL_KEY", "").strip()
+# ----------------------------
+# SECRETS
+# ----------------------------
+def get_secret(name: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
 
-API_KEY = get_api_key()
+API_FOOTBALL_KEY = get_secret("API_FOOTBALL_KEY", "")
+THE_ODDS_API_KEY = get_secret("THE_ODDS_API_KEY", "")
 
-def api_get(path: str, params: dict | None = None, debug_store: dict | None = None):
-    if not API_KEY:
-        raise RuntimeError("API_FOOTBALL_KEY non trovata. Mettila in Streamlit Secrets.")
+# ----------------------------
+# HELPERS
+# ----------------------------
+def season_for_today_utc() -> int:
+    """
+    API-Football usa 'season' = anno di INIZIO stagione.
+    Esempio: 2025/26 -> season=2025
+    """
+    now = datetime.now(timezone.utc)
+    # stagione calcio europea: parte circa ad agosto
+    return now.year if now.month >= 8 else now.year - 1
 
+
+def api_get(path: str, params: dict | None = None) -> tuple[dict, int]:
+    headers = {"x-apisports-key": API_FOOTBALL_KEY} if API_FOOTBALL_KEY else {}
     url = f"{API_BASE}{path}"
-    headers = {
-        "x-apisports-key": API_KEY,   # header corretto per API-Sports
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=20)
+        return r.json(), r.status_code
+    except Exception as e:
+        return {"errors": {"exception": str(e)}, "response": []}, 0
+
+
+def clean_team_name(s: str) -> str:
+    s = s.strip()
+    # normalizza separatori tipo "Milan vs Como", "Milan - Como"
+    s = re.sub(r"\s+vs\s+", " - ", s, flags=re.I)
+    s = re.sub(r"\s*-\s*", " - ", s)
+    return s
+
+
+def parse_match_input(s: str) -> tuple[str, str] | None:
+    s = clean_team_name(s)
+    if " - " not in s:
+        return None
+    a, b = s.split(" - ", 1)
+    return a.strip(), b.strip()
+
+
+def pick_best_team(team_response: list, wanted: str) -> dict | None:
+    """
+    team_response: lista di oggetti API-Football /teams.
+    Prova a prendere il match più sensato per nome.
+    """
+    if not team_response:
+        return None
+    w = wanted.lower().strip()
+
+    # 1) match esatto
+    for item in team_response:
+        name = (item.get("team", {}).get("name") or "").lower()
+        if name == w:
+            return item
+
+    # 2) contiene
+    for item in team_response:
+        name = (item.get("team", {}).get("name") or "").lower()
+        if w in name or name in w:
+            return item
+
+    # 3) fallback: primo
+    return team_response[0]
+
+
+def last_n_form(fixtures: list, team_id: int, n: int = 5) -> str:
+    """
+    Restituisce stringa tipo 'WDLWW' sugli ultimi n match.
+    fixtures: lista response /fixtures
+    """
+    res = []
+    for fx in fixtures[:n]:
+        teams = fx.get("teams", {})
+        home = teams.get("home", {})
+        away = teams.get("away", {})
+        goals = fx.get("goals", {})
+        gh = goals.get("home")
+        ga = goals.get("away")
+        if gh is None or ga is None:
+            continue
+
+        if home.get("id") == team_id:
+            if gh > ga:
+                res.append("W")
+            elif gh < ga:
+                res.append("L")
+            else:
+                res.append("D")
+        elif away.get("id") == team_id:
+            if ga > gh:
+                res.append("W")
+            elif ga < gh:
+                res.append("L")
+            else:
+                res.append("D")
+    return "".join(res) if res else "—"
+
+
+def compute_basic_stats(fixtures: list, team_id: int, n: int = 5) -> dict:
+    """
+    Calcola punti, gol fatti/subiti e media gol totale sugli ultimi n match.
+    """
+    points = 0
+    gf = 0
+    ga = 0
+    counted = 0
+
+    for fx in fixtures[:n]:
+        teams = fx.get("teams", {})
+        home = teams.get("home", {})
+        away = teams.get("away", {})
+        goals = fx.get("goals", {})
+        gh = goals.get("home")
+        ga_ = goals.get("away")
+        if gh is None or ga_ is None:
+            continue
+
+        if home.get("id") == team_id:
+            gf += gh
+            ga += ga_
+            if gh > ga_:
+                points += 3
+            elif gh == ga_:
+                points += 1
+            counted += 1
+
+        elif away.get("id") == team_id:
+            gf += ga_
+            ga += gh
+            if ga_ > gh:
+                points += 3
+            elif ga_ == gh:
+                points += 1
+            counted += 1
+
+        if counted >= n:
+            break
+
+    ppg = (points / counted) if counted else 0.0
+    avg_total_goals = ((gf + ga) / counted) if counted else 0.0
+
+    return {
+        "counted": counted,
+        "points": points,
+        "ppg": ppg,
+        "gf": gf,
+        "ga": ga,
+        "avg_total_goals": avg_total_goals,
     }
 
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=25)
-        if debug_store is not None:
-            debug_store.setdefault("requests", []).append({
-                "url": url,
-                "params": params,
-                "status": r.status_code,
-                "text": r.text[:4000],  # non infinito
-            })
-        r.raise_for_status()
-        return r.json(), r.status_code
-    except requests.RequestException as e:
-        if debug_store is not None:
-            debug_store.setdefault("errors", []).append({
-                "url": url,
-                "params": params,
-                "error": str(e),
-            })
-        raise
 
-def normalize_team_name(name: str) -> str:
-    name = name.strip()
-    name = re.sub(r"\s+", " ", name)
-    return name
-
-def split_match_input(s: str):
-    # accetta: "AC Milan - Como" / "Milan-Como" / "Inter vs Napoli"
-    s = s.strip()
-    s = s.replace("–", "-").replace("—", "-")
-    s = re.sub(r"\s+vs\s+", "-", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s*-\s*", "-", s)
-    parts = s.split("-")
-    if len(parts) != 2:
-        return None, None
-    return normalize_team_name(parts[0]), normalize_team_name(parts[1])
-
-def season_guess_yyyy():
-    # stagione europea: se siamo tra luglio-dicembre => season = anno corrente
-    # se siamo tra gennaio-giugno => season = anno precedente
-    now = datetime.now(timezone.utc)
-    if now.month >= 7:
-        return now.year
-    return now.year - 1
-
-def pick_league_id(country: str, league_name: str, debug: dict):
-    data, _ = api_get("/leagues", {"country": country, "name": league_name}, debug)
-    resp = data.get("response", [])
-    if not resp:
-        return None, []
-    # Prendiamo il primo match più “ufficiale”
-    league_id = resp[0]["league"]["id"]
-    seasons = [x.get("year") for x in resp[0].get("seasons", []) if "year" in x]
-    return league_id, seasons
-
-def find_team_id(team_name: str, league_id: int, season: int, debug: dict):
-    # Prova prima con teams + league + season (più preciso)
-    data, _ = api_get("/teams", {"search": team_name, "league": league_id, "season": season}, debug)
-    resp = data.get("response", [])
-    if resp:
-        return resp[0]["team"]["id"], resp[0]["team"]["name"]
-
-    # Fallback: search globale
-    data2, _ = api_get("/teams", {"search": team_name}, debug)
-    resp2 = data2.get("response", [])
-    if resp2:
-        return resp2[0]["team"]["id"], resp2[0]["team"]["name"]
-
-    return None, None
-
-def find_match_from_next_fixtures(team_a_id: int, team_b_id: int, league_id: int, season: int, debug: dict, next_n: int = 20):
-    # Prendo le prossime partite del team A nella lega/season, e cerco se l’avversario è team B
-    data, _ = api_get("/fixtures", {"league": league_id, "season": season, "team": team_a_id, "next": next_n}, debug)
-    fixtures = data.get("response", [])
-
-    for fx in fixtures:
-        home_id = fx["teams"]["home"]["id"]
-        away_id = fx["teams"]["away"]["id"]
-        if (home_id == team_a_id and away_id == team_b_id) or (home_id == team_b_id and away_id == team_a_id):
-            return fx
-
-    return None
-
-# =========================
+# ----------------------------
 # UI
-# =========================
-st.set_page_config(page_title="Analisi Partita (API-Football)", layout="wide")
-st.title("⚽ Analisi partita (PRO) — dati reali da API-Football (API-Sports)")
+# ----------------------------
+st.title("⚽ Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)")
+st.caption("Analisi basata su dati recenti e disponibilità API. Non è una previsione certa. Trading manuale: inserisci TU le quote live.")
 
-with st.sidebar:
-    st.markdown("### Impostazioni")
-    debug_on = st.checkbox("Mostra DEBUG", value=True)
-    country = st.selectbox("Paese", ["Italy", "England", "Spain", "Germany", "France"], index=0)
-    league_name = st.text_input("Nome lega", value="Serie A")
-    season_mode = st.selectbox("Stagione", ["Auto", "Manuale"], index=0)
-    if season_mode == "Manuale":
-        season = st.number_input("Season (YYYY)", min_value=2000, max_value=2100, value=season_guess_yyyy(), step=1)
-    else:
-        season = season_guess_yyyy()
-    next_n = st.slider("Quante prossime partite controllare (next)", 5, 50, 20)
+tab1, tab2 = st.tabs(["📊 Analisi partita (PRO)", "📈 Trading / Stop (Manuale)"])
 
-st.caption("Inserisci: `AC Milan - Como` oppure `Inter - Napoli` (anche `vs`).")
+with tab1:
+    if not API_FOOTBALL_KEY:
+        st.error("Manca API_FOOTBALL_KEY nei Secrets. Aggiungila in Streamlit → Settings → Secrets.")
+        st.stop()
 
-match_input = st.text_input("Partita", value="AC Milan - Como")
-btn = st.button("🔎 Analizza", type="primary")
+    colA, colB = st.columns([2, 1])
+    with colA:
+        match_input = st.text_input("Partita", value="AC Milan - Como", help="Esempio: Juventus - Atalanta (anche 'vs').")
+    with colB:
+        league_label = st.selectbox("Campionato (consigliato)", ["Auto"] + list(DEFAULT_LEAGUES.keys()), index=0)
 
-debug = {"requests": [], "errors": []} if debug_on else None
+    season = season_for_today_utc()
 
-# =========================
-# RUN
-# =========================
-if btn:
-    try:
-        if not API_KEY:
-            st.error("❌ Manca API_FOOTBALL_KEY nei Secrets.")
+    st.markdown(f"**Stagione stimata:** {season}/{season+1}")
+
+    analyze = st.button("🔎 Analizza", type="primary")
+
+    if analyze:
+        parsed = parse_match_input(match_input)
+        if not parsed:
+            st.error("Formato non valido. Usa: 'Squadra A - Squadra B' (oppure 'vs').")
             st.stop()
 
-        # 1) Status (verifica key OK)
-        status_data, status_code = api_get("/status", None, debug)
-        st.success("✅ API key OK (status 200)")
+        team_a_name, team_b_name = parsed
 
-        # 2) League id + seasons disponibili
-        league_id, available_seasons = pick_league_id(country, league_name, debug if debug_on else {})
-        if not league_id:
-            st.error("❌ Non trovo la lega. Cambia Paese/Nome lega.")
+        with st.spinner("Cerco squadre..."):
+            # 1) Cerca team A e B
+            a_json, a_code = api_get("/teams", {"search": team_a_name})
+            b_json, b_code = api_get("/teams", {"search": team_b_name})
+
+        a_resp = a_json.get("response", []) if isinstance(a_json, dict) else []
+        b_resp = b_json.get("response", []) if isinstance(b_json, dict) else []
+
+        a_team = pick_best_team(a_resp, team_a_name)
+        b_team = pick_best_team(b_resp, team_b_name)
+
+        if not a_team or not b_team:
+            st.error("Non riesco a trovare le squadre. Prova a scrivere il nome più completo (es. 'AC Milan' invece di 'Milan').")
             st.stop()
 
-        st.write(f"**League ID:** {league_id} — **Season stimata:** {season}")
+        a_id = a_team["team"]["id"]
+        b_id = b_team["team"]["id"]
+        a_name = a_team["team"]["name"]
+        b_name = b_team["team"]["name"]
 
-        # 3) Parse input squadra A/B
-        a, b = split_match_input(match_input)
-        if not a or not b:
-            st.error("❌ Formato partita non valido. Esempio: `AC Milan - Como`")
-            st.stop()
+        # League id (se scelto)
+        league_id = None
+        if league_label != "Auto":
+            league_id = DEFAULT_LEAGUES.get(league_label)
 
-        # 4) Team IDs
-        a_id, a_name_api = find_team_id(a, league_id, season, debug if debug_on else {})
-        b_id, b_name_api = find_team_id(b, league_id, season, debug if debug_on else {})
+        st.success("✅ Squadre trovate")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader(f"🏠 {a_name} (id {a_id})")
+        with c2:
+            st.subheader(f"✈️ {b_name} (id {b_id})")
 
-        if not a_id or not b_id:
-            st.error("❌ Non riesco a trovare le squadre. Prova a scrivere il nome più completo (es. 'AC Milan').")
-            st.stop()
+        # 2) Trova fixture (tre tentativi: h2h, range, next)
+        fixture = None
+        fixture_note = ""
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader(f"🏠 {a_name_api} (id {a_id})")
-        with col2:
-            st.subheader(f"✈️ {b_name_api} (id {b_id})")
+        # a) h2h
+        params_h2h = {"h2h": f"{a_id}-{b_id}", "season": season}
+        if league_id:
+            params_h2h["league"] = league_id
 
-        # 5) Cerco partita dalle prossime del Team A
-        fx = find_match_from_next_fixtures(a_id, b_id, league_id, season, debug if debug_on else {}, next_n=next_n)
+        with st.spinner("Cerco fixture (h2h)..."):
+            h2h_json, _ = api_get("/fixtures", params_h2h)
 
-        if not fx:
-            st.error("❌ Fixture non trovata nelle 'next fixtures' del team. Probabile: season non disponibile nel Free, oppure season/league errate.")
+        h2h_list = h2h_json.get("response", []) if isinstance(h2h_json, dict) else []
+        if h2h_list:
+            fixture = h2h_list[0]
+            fixture_note = "Fixture trovata via h2h."
 
-            # Diagnosi: mostro seasons disponibili per questa lega (se API le ritorna)
-            if available_seasons:
-                st.info(f"Stagioni che l'API dichiara per **{league_name}**: {available_seasons[:30]}{' ...' if len(available_seasons) > 30 else ''}")
-                if season not in available_seasons:
-                    st.warning(
-                        f"La season **{season}** NON è nella lista stagioni della lega: questo è compatibile con limitazione del piano Free."
-                    )
+        # b) range date (da ieri a +10 giorni) se non trovata
+        if not fixture:
+            from_dt = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+            to_dt = (datetime.now(timezone.utc) + timedelta(days=10)).date().isoformat()
+            params_range = {"season": season, "from": from_dt, "to": to_dt}
+            if league_id:
+                params_range["league"] = league_id
+            # Per range, l'API filtra per team singolo, quindi facciamo due chiamate e incrociamo
+            with st.spinner("Cerco fixture (range date)..."):
+                a_rng, _ = api_get("/fixtures", {**params_range, "team": a_id})
+                b_rng, _ = api_get("/fixtures", {**params_range, "team": b_id})
 
-            st.stop()
+            a_list = a_rng.get("response", []) if isinstance(a_rng, dict) else []
+            b_list = b_rng.get("response", []) if isinstance(b_rng, dict) else []
 
-        # 6) Se trovata: mostra info base
-        fixture_date = fx["fixture"]["date"]
-        venue = fx["fixture"]["venue"]["name"] if fx["fixture"].get("venue") else "N/D"
-        st.success("✅ Fixture trovata!")
-        st.write(f"**Data:** {fixture_date}")
-        st.write(f"**Stadio:** {venue}")
+            # incrocio per fixture.id
+            b_ids = {fx.get("fixture", {}).get("id") for fx in b_list}
+            for fx in a_list:
+                fid = fx.get("fixture", {}).get("id")
+                if fid in b_ids and fid is not None:
+                    fixture = fx
+                    fixture_note = "Fixture trovata via range date."
+                    break
 
-        # risultato/live
-        status = fx["fixture"]["status"]["long"]
-        st.write(f"**Status:** {status}")
+        # c) next fixtures (senza range) se non trovata
+        if not fixture:
+            params_next_a = {"team": a_id, "next": 10, "season": season}
+            params_next_b = {"team": b_id, "next": 10, "season": season}
+            if league_id:
+                params_next_a["league"] = league_id
+                params_next_b["league"] = league_id
 
-        # Score se esiste
-        goals = fx.get("goals", {})
-        if goals:
-            st.write(f"**Gol:** {goals.get('home')} - {goals.get('away')}")
+            with st.spinner("Cerco fixture (next fixtures)..."):
+                a_next, _ = api_get("/fixtures", params_next_a)
+                b_next, _ = api_get("/fixtures", params_next_b)
 
-    except Exception as e:
-        st.error(f"Errore: {e}")
+            a_list = a_next.get("response", []) if isinstance(a_next, dict) else []
+            b_list = b_next.get("response", []) if isinstance(b_next, dict) else []
 
-# =========================
-# DEBUG VIEW
-# =========================
-if debug_on and debug is not None:
-    st.divider()
-    st.subheader("🛠 DEBUG (richieste e risposte)")
+            b_ids = {fx.get("fixture", {}).get("id") for fx in b_list}
+            for fx in a_list:
+                fid = fx.get("fixture", {}).get("id")
+                if fid in b_ids and fid is not None:
+                    fixture = fx
+                    fixture_note = "Fixture trovata via next fixtures."
+                    break
 
-    with st.expander("DEBUG — Ultime richieste API (url/params/status)"):
-        st.json(debug.get("requests", []), expanded=False)
+        # 3) Se fixture non trovata -> fallback: analisi ultimi match squadra
+        if not fixture:
+            st.warning("Fixture non trovata nel range: analisi basata su ultimi match squadra (fallback).")
 
-    with st.expander("DEBUG — Errori"):
-        st.json(debug.get("errors", []), expanded=False)
+        # 4) Recupera ultimi match per forma e stats
+        # ultimi 5 match per ogni team (senza league per essere più robusto)
+        with st.spinner("Recupero ultimi match..."):
+            a_last_json, _ = api_get("/fixtures", {"team": a_id, "last": 5, "season": season})
+            b_last_json, _ = api_get("/fixtures", {"team": b_id, "last": 5, "season": season})
+
+        a_last = a_last_json.get("response", []) if isinstance(a_last_json, dict) else []
+        b_last = b_last_json.get("response", []) if isinstance(b_last_json, dict) else []
+
+        a_form = last_n_form(a_last, a_id, n=5)
+        b_form = last_n_form(b_last, b_id, n=5)
+
+        a_stats = compute_basic_stats(a_last, a_id, n=5)
+        b_stats = compute_basic_stats(b_last, b_id, n=5)
+
+        # 5) Infortuni/squalifiche (se disponibili) -> spesso limitato nel free
+        injuries_a = 0
+        injuries_b = 0
+        susp_a = 0
+        susp_b = 0
+
+        # Se abbiamo fixture, proviamo /injuries per fixture
+        if fixture:
+            fid = fixture.get("fixture", {}).get("id")
+            if fid:
+                with st.spinner("Recupero infortuni (se disponibili)..."):
+                    inj_json, _ = api_get("/injuries", {"fixture": fid})
+                inj_list = inj_json.get("response", []) if isinstance(inj_json, dict) else []
+                for it in inj_list:
+                    team = (it.get("team", {}) or {}).get("id")
+                    if team == a_id:
+                        injuries_a += 1
+                    elif team == b_id:
+                        injuries_b += 1
+
+        # 6) UI output
+        st.success("✅ Analisi pronta")
+
+        info_box = st.container()
+        with info_box:
+            title = f"{a_name} vs {b_name}"
+            st.subheader(title)
+            if fixture_note:
+                st.caption(fixture_note)
+
+            if fixture:
+                dt_str = fixture.get("fixture", {}).get("date")
+                league_name = fixture.get("league", {}).get("name")
+                round_name = fixture.get("league", {}).get("round")
+                if dt_str:
+                    st.write(f"📅 Data (UTC): **{dt_str}**")
+                if league_name:
+                    st.write(f"🏟️ Competizione: **{league_name}**")
+                if round_name:
+                    st.write(f"🔁 Round: **{round_name}**")
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.markdown(f"## 🏠 {a_name}")
+            st.write(f"• Forma (ultimi 5): **{a_form}**")
+            st.write(f"• Punti: **{a_stats['points']}** (PPG: **{a_stats['ppg']:.2f}**)")
+            st.write(f"• Gol fatti/subiti: **{a_stats['gf']} / {a_stats['ga']}**")
+            st.write(f"• Media gol totali: **{a_stats['avg_total_goals']:.2f}**")
+            st.write(f"• Infortunati (da API, se disponibili): **{injuries_a}** | Squalificati (stimati): **{susp_a}** | Dubbi: **0**")
+
+        with c2:
+            st.markdown(f"## ✈️ {b_name}")
+            st.write(f"• Forma (ultimi 5): **{b_form}**")
+            st.write(f"• Punti: **{b_stats['points']}** (PPG: **{b_stats['ppg']:.2f}**)")
+            st.write(f"• Gol fatti/subiti: **{b_stats['gf']} / {b_stats['ga']}**")
+            st.write(f"• Media gol totali: **{b_stats['avg_total_goals']:.2f}**")
+            st.write(f"• Infortunati (da API, se disponibili): **{injuries_b}** | Squalificati (stimati): **{susp_b}** | Dubbi: **0**")
+
+        # 7) Suggerimenti (semplici, trasparenti)
+        st.markdown("---")
+        st.markdown("## 🧠 Suggerimenti (trasparenti, NON certezze)")
+
+        # euristica semplice basata su media gol
+        avg_total = (a_stats["avg_total_goals"] + b_stats["avg_total_goals"]) / 2 if (a_stats["counted"] and b_stats["counted"]) else 0.0
+
+        tips = []
+        if avg_total and avg_total < 2.2:
+            tips.append("Tendenza gol bassa → valuta **Under 2.5 / Under 3.5** (con prudenza).")
+        elif avg_total and avg_total > 3.0:
+            tips.append("Tendenza gol alta → valuta **Over 2.5** o linee gol live (solo se quote ok).")
+        else:
+            tips.append("Squadre vicine → attenzione al **1X2**; spesso value è su linee gol/live.")
+
+        tips.append("Ricorda: è solo lettura dati recenti, **NON** una previsione.")
+
+        for t in tips:
+            st.write(f"• {t}")
+
+with tab2:
+    st.subheader("📈 Trading / Stop (Manuale)")
+    st.write("Qui puoi inserire le quote live manualmente e gestire stop/uscita. (Modulo base, personalizzabile)")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        stake = st.number_input("Stake (€)", min_value=1.0, value=20.0, step=1.0)
+    with col2:
+        odd_in = st.number_input("Quota entrata", min_value=1.01, value=1.80, step=0.01)
+    with col3:
+        odd_out = st.number_input("Quota uscita (target)", min_value=1.01, value=1.60, step=0.01)
+
+    # Calcoli base
+    implied_in = 1.0 / odd_in
+    implied_out = 1.0 / odd_out
+    st.write(f"Prob. implicita entrata: **{implied_in*100:.2f}%**")
+    st.write(f"Prob. implicita uscita: **{implied_out*100:.2f}%**")
+
+    st.info("Se vuoi, qui possiamo aggiungere calcolo hedge / cashout / stop-loss in base al tuo book.")
 
