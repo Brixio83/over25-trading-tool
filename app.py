@@ -1,791 +1,562 @@
-
-# app.py
-# Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)
-# ✅ FIX: ricerca fixture "intelligente" (range ampio + next/last fallback) per evitare "tutto 0".
-# ✅ Usa API-FOOTBALL (api-sports) + (opzionale) The Odds API per quote (se vuoi).
-#
-# --- STREAMLIT SECRETS (Settings → Secrets su Streamlit Cloud) ---
-# THE_ODDS_API_KEY = "la_tua_key_odds_api"          # opzionale
-# API_FOOTBALL_KEY = "la_tua_key_api_football"      # obbligatoria per Analisi PRO
-#
-# NOTE: Non mettere le API key nel codice/GitHub.
-
-from __future__ import annotations
-
+ # app.py
 import re
 import math
-import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
-
 import requests
 import streamlit as st
+from datetime import datetime, timezone
 
-# =============================
-# CONFIG
-# =============================
+# =========================
+# CONFIG UI
+# =========================
+st.set_page_config(page_title="Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)", layout="wide")
+st.title("⚽ Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)")
+st.caption("Analisi basata su dati recenti e disponibilità API. Non è una previsione certa. Trading manuale: inserisci TU le quote live.")
 
-API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
-THE_ODDS_BASE = "https://api.the-odds-api.com/v4"
-
-DEFAULT_LEAGUES = {
-    "Serie A (ITA)": 135,
-    "Serie B (ITA)": 136,
-    "Premier League (ENG)": 39,
-    "LaLiga (ESP)": 140,
-    "Bundesliga (GER)": 78,
-    "Ligue 1 (FRA)": 61,
-    "Champions League": 2,
-    "Europa League": 3,
-}
-
-# =============================
-# UTILS
-# =============================
-
-
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def season_for_date(dt: datetime) -> int:
-    # Calcio: stagione "anno inizio" tipicamente da luglio.
-    # Esempio: Feb 2026 -> season 2025
-    return dt.year if dt.month >= 7 else dt.year - 1
-
-
-def safe_float(x: Any) -> Optional[float]:
+# =========================
+# SECRETS / KEYS
+# =========================
+def get_secret(name: str, default: str = "") -> str:
     try:
-        if x is None:
-            return None
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+API_FOOTBALL_KEY = get_secret("API_FOOTBALL_KEY", "")
+THE_ODDS_API_KEY = get_secret("THE_ODDS_API_KEY", "")
+
+API_FOOTBALL_HOST = "https://v3.football.api-sports.io"
+
+# =========================
+# HELPERS
+# =========================
+def season_for_today(dt: datetime | None = None) -> int:
+    """Stagione calcistica tipica: da luglio a giugno. Es: febbraio 2026 -> season 2025."""
+    dt = dt or datetime.now(timezone.utc)
+    y = dt.year
+    if dt.month >= 7:
+        return y
+    return y - 1
+
+def safe_float(x, default=0.0):
+    try:
         return float(x)
     except Exception:
-        return None
+        return default
 
+def fmt2(x: float) -> str:
+    return f"{x:.2f}"
 
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
-
-
-def norm_team_name(s: str) -> str:
-    s = s.strip().lower()
-    s = re.sub(r"[^a-z0-9\s\-]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def parse_match_input(text: str) -> Optional[Tuple[str, str]]:
-    if not text or not text.strip():
-        return None
+def split_match_input(text: str):
+    """
+    Accetta: 'Inter - Napoli' / 'Inter-Napoli' / 'Inter vs Napoli' / 'Inter Napoli'
+    """
     t = text.strip()
-    # accetta: "Juve-Atalanta", "Juve - Atalanta", "Juve vs Atalanta"
-    t = re.sub(r"\s+vs\s+", " - ", t, flags=re.IGNORECASE)
+    if not t:
+        return None, None
+    # normalizza separatori
+    t = re.sub(r"\s+vs\s+|\s+v\s+", "-", t, flags=re.IGNORECASE)
+    t = t.replace("—", "-").replace("–", "-").replace(":", "-")
     if "-" in t:
         parts = [p.strip() for p in t.split("-") if p.strip()]
         if len(parts) >= 2:
             return parts[0], parts[1]
-    return None
+    # fallback: prova split su doppio spazio
+    parts = [p.strip() for p in re.split(r"\s{2,}", t) if p.strip()]
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return None, None
 
+def api_headers():
+    if not API_FOOTBALL_KEY:
+        return None
+    return {"x-apisports-key": API_FOOTBALL_KEY}
 
-def api_football_headers(api_key: str) -> Dict[str, str]:
-    return {"x-apisports-key": api_key}
+def api_get(path: str, params: dict):
+    """
+    Wrapper robusto per API-Football.
+    """
+    headers = api_headers()
+    if headers is None:
+        return None, {"error": "API_FOOTBALL_KEY mancante nei secrets."}
 
-
-def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], timeout: int = 25) -> Dict[str, Any]:
-    r = requests.get(url, headers=headers, params=params, timeout=timeout)
+    url = f"{API_FOOTBALL_HOST}{path}"
     try:
-        data = r.json()
-    except Exception:
-        data = {"errors": {"json": "Invalid JSON"}, "raw": r.text}
-    data["_http_status"] = r.status_code
-    data["_url"] = r.url
-    return data
+        r = requests.get(url, headers=headers, params=params, timeout=25)
+        js = r.json()
+        return r, js
+    except Exception as e:
+        return None, {"error": str(e)}
 
-
-# =============================
-# API-FOOTBALL (API-SPORTS)
-# =============================
-import streamlit as st
-import requests
-
-def api_get(url, params=None):
-    key = st.secrets.get("API_FOOTBALL_KEY", "")
-    headers = {"x-apisports-key": key}
-    r = requests.get(url, headers=headers, params=params, timeout=20)
-    return r
-
-# DEBUG: test API
-st.write("DEBUG: API_FOOTBALL_KEY presente?", bool(st.secrets.get("API_FOOTBALL_KEY")))
-test = api_get("https://v3.football.api-sports.io/status")
-st.write("DEBUG /status code:", test.status_code)
-st.write("DEBUG /status json:", test.json())
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def search_team(api_key: str, query: str) -> List[Dict[str, Any]]:
-    url = f"{API_FOOTBALL_BASE}/teams"
-    data = http_get_json(url, api_football_headers(api_key), {"search": query})
-    return data.get("response", []) or []
-
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def get_team_last_fixtures(api_key: str, team_id: int, season: int, last: int = 10) -> List[Dict[str, Any]]:
-    url = f"{API_FOOTBALL_BASE}/fixtures"
-    data = http_get_json(url, api_football_headers(api_key), {"team": team_id, "season": season, "last": last})
-    return data.get("response", []) or []
-
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def get_team_next_fixtures(api_key: str, team_id: int, season: int, nxt: int = 20) -> List[Dict[str, Any]]:
-    url = f"{API_FOOTBALL_BASE}/fixtures"
-    data = http_get_json(url, api_football_headers(api_key), {"team": team_id, "season": season, "next": nxt})
-    return data.get("response", []) or []
-
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def get_fixtures_in_range(
-    api_key: str,
-    team_id: int,
-    from_date: datetime,
-    to_date: datetime,
-    season: int,
-    league_id: Optional[int] = None,
-    limit: int = 100,
-) -> List[Dict[str, Any]]:
-    url = f"{API_FOOTBALL_BASE}/fixtures"
-    params: Dict[str, Any] = {
-        "team": team_id,
-        "season": season,
-        "from": from_date.date().isoformat(),
-        "to": to_date.date().isoformat(),
-    }
-    if league_id:
-        params["league"] = league_id
-    data = http_get_json(url, api_football_headers(api_key), params)
-    resp = data.get("response", []) or []
-    return resp[:limit]
-
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[int]) -> List[Dict[str, Any]]:
-    url = f"{API_FOOTBALL_BASE}/injuries"
-    params: Dict[str, Any] = {"team": team_id, "season": season}
-    if league_id:
-        params["league"] = league_id
-    data = http_get_json(url, api_football_headers(api_key), params)
-    return data.get("response", []) or []
-
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def get_players_sidelined_guess(api_key: str, team_id: int, season: int) -> int:
-    # Non tutti i piani forniscono endp. "injuries" completo; fallback: conta righe se disponibili.
-    try:
-        # prova injuries senza league
-        inj = get_injuries(api_key, team_id, season, league_id=None)
-        return len(inj)
-    except Exception:
-        return 0
-
-
-def fixture_match_teams(fx: Dict[str, Any], a_id: int, b_id: int) -> bool:
-    teams = fx.get("teams", {}) or {}
-    home = (teams.get("home", {}) or {}).get("id")
-    away = (teams.get("away", {}) or {}).get("id")
-    return (home == a_id and away == b_id) or (home == b_id and away == a_id)
-
-
-@dataclass
-class FixturePick:
-    fixture: Optional[Dict[str, Any]]
-    message: str
-    season: int
-
-
-def find_fixture_smart(
-    api_key: str,
-    team_a_id: int,
-    team_b_id: int,
-    league_id: Optional[int],
-) -> FixturePick:
+@st.cache_data(ttl=60 * 20, show_spinner=False)
+def cached_team_search(search: str, country: str | None, league: int | None, season: int | None):
     """
-    Strategia:
-      1) Range ampio: -30 giorni / +90 giorni (stessa season)
-      2) Next fixtures (20) del team A e cerca team B
-      3) Next fixtures (20) del team B e cerca team A
-      4) Se ancora niente: ritorna None e fai analisi su last fixtures (fallback sensato)
+    Cerca team con API /teams.
+    Se league e season sono disponibili, restringe i risultati (molto più preciso).
     """
-    dt = now_utc()
-    season = season_for_date(dt)
+    params = {"search": search}
+    if country:
+        params["country"] = country
+    if league is not None and season is not None:
+        params["league"] = league
+        params["season"] = season
 
-    from_dt = dt - timedelta(days=30)
-    to_dt = dt + timedelta(days=90)
+    r, js = api_get("/teams", params)
+    return js
 
-    # 1) Range ampio su team A
-    fx_range = get_fixtures_in_range(api_key, team_a_id, from_dt, to_dt, season, league_id=league_id)
-    for fx in fx_range:
-        if fixture_match_teams(fx, team_a_id, team_b_id):
-            return FixturePick(fixture=fx, message="Fixture trovata nel range (-30/+90 giorni).", season=season)
-
-    # 2) Next su A
-    fx_next_a = get_team_next_fixtures(api_key, team_a_id, season, nxt=25)
-    for fx in fx_next_a:
-        if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
-            continue
-        if fixture_match_teams(fx, team_a_id, team_b_id):
-            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT del Team A.", season=season)
-
-    # 3) Next su B
-    fx_next_b = get_team_next_fixtures(api_key, team_b_id, season, nxt=25)
-    for fx in fx_next_b:
-        if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
-            continue
-        if fixture_match_teams(fx, team_a_id, team_b_id):
-            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT del Team B.", season=season)
-
-    return FixturePick(
-        fixture=None,
-        message="Fixture non trovata (range + next). Analisi basata su ultimi match squadra (fallback).",
-        season=season,
-    )
-
-
-# =============================
-# ANALISI (semplice, trasparente)
-# =============================
-
-def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[str, Any]:
+def pick_team_id(search_name: str, js: dict):
     """
-    Calcola:
-      - punti tot e PPG
-      - gol fatti/subiti
-      - media gol totali partita
-      - stringa forma (W/D/L)
+    Sceglie l'id più sensato da una search.
     """
-    if not last_fixtures:
-        return {
-            "matches": 0,
-            "points": 0,
-            "ppg": 0.0,
-            "gf": 0,
-            "ga": 0,
-            "avg_total_goals": 0.0,
-            "form": "",
-        }
+    resp = js.get("response", []) if isinstance(js, dict) else []
+    if not resp:
+        return None, None
 
+    target = search_name.lower().strip()
+
+    # 1) match "contains" sul nome team
+    for item in resp:
+        nm = (item.get("team", {}).get("name") or "").lower()
+        if target and target in nm:
+            team_id = item.get("team", {}).get("id")
+            return team_id, item.get("team", {}).get("name")
+
+    # 2) match "contains" su code/alias
+    for item in resp:
+        code = (item.get("team", {}).get("code") or "").lower()
+        nm = (item.get("team", {}).get("name") or "").lower()
+        if target and (target == code or code in target or target in code):
+            team_id = item.get("team", {}).get("id")
+            return team_id, item.get("team", {}).get("name")
+
+    # 3) fallback: primo risultato
+    team_id = resp[0].get("team", {}).get("id")
+    return team_id, resp[0].get("team", {}).get("name")
+
+def get_team_id(team_name: str, country: str | None, league: int | None, season: int | None):
+    js = cached_team_search(team_name, country=country, league=league, season=season)
+    if js.get("errors"):
+        return None, None, js
+    team_id, resolved_name = pick_team_id(team_name, js)
+    return team_id, resolved_name, js
+
+@st.cache_data(ttl=60 * 15, show_spinner=False)
+def cached_fixtures(params: dict):
+    r, js = api_get("/fixtures", params)
+    return js
+
+@st.cache_data(ttl=60 * 15, show_spinner=False)
+def cached_injuries(params: dict):
+    r, js = api_get("/injuries", params)
+    return js
+
+def compute_last_matches_stats(fixtures: list):
+    """
+    fixtures: lista response API /fixtures
+    Calcola: punti, gol fatti/subiti, media gol totali.
+    """
     pts = 0
     gf = 0
     ga = 0
-    form = []
+    played = 0
 
-    for fx in last_fixtures:
-        teams = fx.get("teams", {}) or {}
-        goals = fx.get("goals", {}) or {}
-        home = (teams.get("home", {}) or {}).get("id")
-        away = (teams.get("away", {}) or {}).get("id")
+    for fx in fixtures:
+        teams = fx.get("teams", {})
+        goals = fx.get("goals", {})
+        if not goals:
+            continue
+
+        # deve essere finita
+        status = fx.get("fixture", {}).get("status", {}).get("short", "")
+        if status not in ("FT", "AET", "PEN"):
+            continue
+
+        home_winner = teams.get("home", {}).get("winner", None)
+        away_winner = teams.get("away", {}).get("winner", None)
+
+        # individua se la squadra analizzata è home o away
+        # (lo ricaviamo dai goals presenti e team id non lo abbiamo qui, quindi assumiamo fixture completa)
+        # Qui usiamo un trick: se home_winner True/False/None basta per punti "per home/away",
+        # ma per la singola squadra il chiamante deve passarci fixtures filtrate per team.
+        # Quindi il calcolo punti deve essere fatto dal chiamante sapendo se team è home/away.
+        # => Qui calcoliamo solo gol, mentre i punti li calcoliamo fuori.
+        played += 1
         gh = goals.get("home")
         ga_ = goals.get("away")
-
-        # se fixture non giocata, skip
         if gh is None or ga_ is None:
             continue
 
-        if home == team_id:
-            gf += int(gh)
-            ga += int(ga_)
-            if gh > ga_:
-                pts += 3
-                form.append("W")
-            elif gh == ga_:
-                pts += 1
-                form.append("D")
-            else:
-                form.append("L")
-        elif away == team_id:
-            gf += int(ga_)
-            ga += int(gh)
-            if ga_ > gh:
-                pts += 3
-                form.append("W")
-            elif ga_ == gh:
-                pts += 1
-                form.append("D")
-            else:
-                form.append("L")
+        # Gol totali (per medie generali)
+        # Non sappiamo se il team è home o away: quindi qui non possiamo assegnare gf/ga correttamente.
+        # Li calcoliamo fuori con la funzione dedicata.
+    return {"played": played}
 
-    played = len(form)
-    if played == 0:
-        return {
-            "matches": 0,
-            "points": 0,
-            "ppg": 0.0,
-            "gf": 0,
-            "ga": 0,
-            "avg_total_goals": 0.0,
-            "form": "",
-        }
+def compute_team_form_from_fixtures(fixtures: list, team_id: int):
+    pts = 0
+    gf = 0
+    ga = 0
+    played = 0
+    for fx in fixtures:
+        status = fx.get("fixture", {}).get("status", {}).get("short", "")
+        if status not in ("FT", "AET", "PEN"):
+            continue
 
-    avg_total_goals = (gf + ga) / played
+        teams = fx.get("teams", {})
+        goals = fx.get("goals", {})
+        if goals.get("home") is None or goals.get("away") is None:
+            continue
+
+        home_id = teams.get("home", {}).get("id")
+        away_id = teams.get("away", {}).get("id")
+
+        gh = goals.get("home", 0) or 0
+        ga_ = goals.get("away", 0) or 0
+
+        is_home = (home_id == team_id)
+        is_away = (away_id == team_id)
+        if not (is_home or is_away):
+            continue
+
+        played += 1
+        if is_home:
+            gf += gh
+            ga += ga_
+            winner = teams.get("home", {}).get("winner")
+        else:
+            gf += ga_
+            ga += gh
+            winner = teams.get("away", {}).get("winner")
+
+        if winner is True:
+            pts += 3
+        elif winner is None:
+            pts += 1
+        else:
+            pts += 0
+
+    avg_total_goals = (gf + ga) / played if played else 0.0
+    ppg = pts / played if played else 0.0
     return {
-        "matches": played,
+        "played": played,
         "points": pts,
-        "ppg": pts / played,
+        "ppg": ppg,
         "gf": gf,
         "ga": ga,
         "avg_total_goals": avg_total_goals,
-        "form": "".join(form[-5:]),
     }
 
+def stars_from_ppg(ppg: float) -> str:
+    # scala semplice 0..3 => 0..5 stelle
+    # 0.0 => 1 stella, 3.0 => 5 stelle
+    x = max(0.0, min(3.0, ppg))
+    stars = 1 + int(round((x / 3.0) * 4))
+    return "★" * stars + "☆" * (5 - stars)
 
-def suggest_markets(a: Dict[str, Any], b: Dict[str, Any]) -> List[str]:
-    """
-    Suggerimenti "trasparenti" e NON predittivi:
-    Usa solo heuristiche basate su media gol e ppg.
-    """
-    sug = []
-    avg_goals = (a["avg_total_goals"] + b["avg_total_goals"]) / 2.0
-    ppg_diff = abs(a["ppg"] - b["ppg"])
+def build_suggestions(avg_total: float, home_ppg: float, away_ppg: float):
+    suggestions = []
 
-    if avg_goals >= 3.0:
-        sug.append("Tendenza gol alta → valuta Over 2.5 / Over 3.5 (con prudenza).")
-    elif avg_goals <= 2.1:
-        sug.append("Tendenza gol bassa → valuta Under 2.5 / Under 3.5 (con prudenza).")
+    # linee goal
+    if avg_total <= 2.10:
+        suggestions.append("Tendenza gol bassa → valuta Under 2.5 / Under 3.5 (con prudenza).")
+    elif avg_total <= 2.60:
+        suggestions.append("Gol moderati → spesso la zona 'Under 3.5' è la più stabile; occhio al live.")
+    elif avg_total <= 3.20:
+        suggestions.append("Gol abbastanza alti → valuta Over 2.5, ma gestisci con stop (quota sale se non segnano).")
     else:
-        sug.append("Gol medi → mercato goal/over dipende dal live (non c'è edge automatico).")
+        suggestions.append("Tendenza gol alta → possibili spot su Over 2.5/3.5; attenzione ai rossi e al ritmo partita.")
 
-    if ppg_diff >= 1.0:
-        sug.append("Differenza forma/punti alta → 1X2 o Doppia Chance può essere più coerente.")
+    # equilibrio 1X2
+    diff = abs(home_ppg - away_ppg)
+    if diff < 0.35:
+        suggestions.append("Squadre vicine → attenzione al 1X2; spesso value su linee goal / gestione live.")
     else:
-        sug.append("Squadre vicine → attenzione al 1X2; spesso value è su linee gol/live.")
+        suggestions.append("Squadra più forte sui numeri recenti → se giochi 1X2 valuta copertura live su momenti chiave.")
 
-    sug.append("Ricorda: è solo lettura dati recenti, NON una previsione.")
-    return sug
+    suggestions.append("Ricorda: è solo lettura dati recenti, NON una previsione certa.")
+    return suggestions
 
-
-# =============================
-# TRADING / STOP (manuale)
-# =============================
-
-def lay_liability(lay_stake: float, lay_odds: float) -> float:
-    return lay_stake * (lay_odds - 1.0)
-
-
-def pnl_if_win(back_stake: float, back_odds: float, lay_stake_: float, lay_odds_: float, comm: float) -> float:
-    # Se la giocata BACK vince:
-    # Profitto back = back_stake*(back_odds-1)
-    # Perdita lay = liability
-    # Commissione su profitto netto lato exchange (semplificazione: applichiamo commissione SOLO su eventuale profitto finale positivo)
-    gross = back_stake * (back_odds - 1.0) - lay_liability(lay_stake_, lay_odds_)
-    if gross > 0:
-        gross = gross * (1.0 - comm)
-    return gross
-
-
-def pnl_if_lose(back_stake: float, lay_stake_: float, comm: float) -> float:
-    # Se la giocata BACK perde:
-    # Perdita back = -back_stake
-    # Vincita lay = +lay_stake (meno comm se positivo)
-    gross = -back_stake + lay_stake_
-    if gross > 0:
-        gross = gross * (1.0 - comm)
-    return gross
-
-
-def lay_stake_for_target_loss_when_lose(back_stake: float, target_loss: float) -> float:
+# =========================
+# TRADING CALCULATIONS
+# =========================
+def lay_stake_for_max_loss_if_lose(back_stake: float, max_loss_if_lose: float, commission: float):
     """
-    Target_loss: numero positivo (es. 5€) = "voglio perdere al massimo 5€ se PERDO"
-    Esito se perdo: -back_stake + lay_stake = -target_loss  => lay_stake = back_stake - target_loss
+    Impone che:
+    - Se PERDI (selezione NON esce): risultato = -max_loss_if_lose
+      risultato_lose = L*(1-c) - S
+      => L = (S - max_loss)/ (1-c)
     """
-    return max(0.0, back_stake - target_loss)
-
-
-def lay_odds_needed_for_min_profit_if_win(
-    back_stake: float,
-    back_odds: float,
-    lay_stake_: float,
-    min_profit_win: float,
-    comm: float,
-) -> Optional[float]:
-    """
-    Trova la lay_odds massima consentita per avere almeno min_profit_win se VINCO.
-    profit_win = back_stake*(back_odds-1) - lay_stake*(lay_odds-1)
-    Se profit_win > 0, applichiamo comm.
-    In pratica risolviamo conservativo ignorando comm sul vinco? No: la includiamo sul target.
-    Conservativo: richiediamo gross*(1-comm) >= min_profit_win -> gross >= min_profit_win/(1-comm)
-    gross = back_stake*(back_odds-1) - lay_stake*(lay_odds-1)
-    => lay_odds <= 1 + ( back_stake*(back_odds-1) - gross_target ) / lay_stake
-    """
-    if lay_stake_ <= 0:
+    c = commission
+    denom = (1.0 - c)
+    if denom <= 0:
         return None
-    gross_target = min_profit_win / max(1e-9, (1.0 - comm))
-    numerator = back_stake * (back_odds - 1.0) - gross_target
-    max_lay_odds = 1.0 + (numerator / lay_stake_)
-    if max_lay_odds <= 1.01:
+    if back_stake <= max_loss_if_lose:
         return None
-    return max_lay_odds
+    L = (back_stake - max_loss_if_lose) / denom
+    return L
 
-
-def make_stop_plan(
-    back_stake: float,
-    back_odds: float,
-    comm_pct: float,
-    max_loss_if_lose: float,
-    min_profit_if_win: float,
-    stop_steps: List[int],
-) -> List[Dict[str, Any]]:
+def max_lay_odds_allowed(back_stake: float, back_odds: float, lay_stake: float, min_profit_if_win: float):
     """
-    Per ogni stop% definiamo una "quota stop" = back_odds*(1+stop%)
-    e calcoliamo la bancata che rispetti:
-      - se PERDI: perdita >= -max_loss_if_lose
-      - se VINCI: profitto >= min_profit_if_win
-    Qui semplifichiamo: scegliamo lay_stake per target loss se perdi,
-    e poi verifichiamo se con lay_odds=quota_stop rispetta profitto minimo.
+    Impone che:
+    risultato_win = S*(Ob-1) - L*(Ol-1) >= min_profit
+    => Ol <= 1 + (S*(Ob-1) - min_profit)/L
     """
-    comm = comm_pct / 100.0
-    plan = []
+    if lay_stake <= 0:
+        return None
+    numerator = back_stake * (back_odds - 1.0) - min_profit_if_win
+    return 1.0 + (numerator / lay_stake)
 
-    for s in stop_steps:
-        quota_stop = back_odds * (1.0 + s / 100.0)
-
-        lay_stake_ = lay_stake_for_target_loss_when_lose(back_stake, max_loss_if_lose)
-        if lay_stake_ <= 0:
-            plan.append(
-                {
-                    "Stop": f"+{s}%",
-                    "Quota stop": round(quota_stop, 2),
-                    "Banca consigliata": "—",
-                    "Esito se VINCI": "—",
-                    "Esito se PERDI": "—",
-                    "Note": "Impossibile (perdita max troppo bassa rispetto alla puntata).",
-                }
-            )
-            continue
-
-        win_pnl = pnl_if_win(back_stake, back_odds, lay_stake_, quota_stop, comm)
-        lose_pnl = pnl_if_lose(back_stake, lay_stake_, comm)
-
-        if win_pnl < min_profit_if_win - 1e-9:
-            max_lay = lay_odds_needed_for_min_profit_if_win(back_stake, back_odds, lay_stake_, min_profit_if_win, comm)
-            note = "Impossibile (profitto minimo troppo alto o stop troppo aggressivo)."
-            if max_lay:
-                note += f" Prova quota stop ≤ {max_lay:.2f} oppure abbassa profitto minimo."
-            plan.append(
-                {
-                    "Stop": f"+{s}%",
-                    "Quota stop": round(quota_stop, 2),
-                    "Banca consigliata": "—",
-                    "Esito se VINCI": "—",
-                    "Esito se PERDI": "—",
-                    "Note": note,
-                }
-            )
-            continue
-
-        if lose_pnl < -max_loss_if_lose - 1e-9:
-            plan.append(
-                {
-                    "Stop": f"+{s}%",
-                    "Quota stop": round(quota_stop, 2),
-                    "Banca consigliata": "—",
-                    "Esito se VINCI": "—",
-                    "Esito se PERDI": "—",
-                    "Note": "Impossibile (perdita se perdi oltre max).",
-                }
-            )
-            continue
-
-        plan.append(
-            {
-                "Stop": f"+{s}%",
-                "Quota stop": round(quota_stop, 2),
-                "Banca consigliata": f"{lay_stake_:.2f} €",
-                "Esito se VINCI": f"{win_pnl:+.2f} €",
-                "Esito se PERDI": f"{lose_pnl:+.2f} €",
-                "Note": "OK",
-            }
-        )
-
-    return plan
-
-
-# =============================
-# UI
-# =============================
-
-st.set_page_config(page_title="Trading Tool PRO (Calcio)", layout="wide")
-
-# Basic CSS for nicer look on mobile
-st.markdown(
+def greenup_lay_stake(back_stake: float, back_odds: float, lay_odds_now: float, commission: float):
     """
-<style>
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-h1, h2, h3 { letter-spacing: -0.02em; }
-.small-muted { opacity: 0.75; font-size: 0.92rem; }
-.card {
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.03);
-  border-radius: 16px;
-  padding: 16px;
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+    Green-up (tipo cashout): scegli L tale che profitto sia uguale in entrambi gli esiti.
+    Derivazione:
+    S*Ob = L*(Ol - c)
+    => L = S*Ob / (Ol - c)
+    """
+    c = commission
+    denom = (lay_odds_now - c)
+    if denom <= 0:
+        return None
+    return (back_stake * back_odds) / denom
 
-st.title("⚽ Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)")
-st.caption("Analisi basata su dati recenti e disponibilità API. Non è una previsione certa.")
+def outcomes(back_stake: float, back_odds: float, lay_stake: float, lay_odds: float, commission: float):
+    c = commission
+    win = back_stake * (back_odds - 1.0) - lay_stake * (lay_odds - 1.0)
+    lose = lay_stake * (1.0 - c) - back_stake
+    return win, lose
 
-# Secrets read
-secrets_keys = dict(st.secrets) if hasattr(st, "secrets") else {}
-api_football_key = secrets_keys.get("API_FOOTBALL_KEY", "")
-the_odds_key = secrets_keys.get("THE_ODDS_API_KEY", "")
+# =========================
+# UI TABS
+# =========================
+tab1, tab2 = st.tabs(["📊 Analisi partita (PRO)", "📈 Trading / Stop (Manuale)"])
 
-with st.expander("🔧 DEBUG (solo se serve)", expanded=False):
-    st.write("keys nei secrets →")
-    st.json({k: ("***" if "KEY" in k else v) for k, v in secrets_keys.items()})
-    if api_football_key:
-        st.write(f"DEBUG: API_FOOTBALL_KEY presente (lunghezza {len(api_football_key)}).")
-    else:
-        st.warning("API_FOOTBALL_KEY NON trovata nei Secrets. Analisi PRO non funzionerà.")
+# =========================
+# TAB 1 — ANALISI PRO
+# =========================
+with tab1:
+    st.subheader("📊 Analisi partita (PRO) — dati reali da API-Football (API-Sports)")
 
-tabs = st.tabs(["📊 Analisi partita (PRO)", "🧮 Trading / Stop (Manuale)"])
+    colA, colB = st.columns([2, 1])
 
-# -----------------------------
-# TAB 1: ANALISI PRO
-# -----------------------------
-with tabs[0]:
-    st.subheader("📊 Analisi partita (PRO)")
-
-    colA, colB = st.columns([2, 1], gap="large")
     with colA:
-        match_text = st.text_input("Partita", value=st.session_state.get("match_text", ""), placeholder="Es: AC Milan - Como")
+        match_text = st.text_input("Partita", value="Inter - Napoli", help="Esempio: Inter - Napoli (oppure Milan-Como, Juventus - Atalanta)")
     with colB:
-        league_label = st.selectbox("Campionato (consigliato)", options=["Auto"] + list(DEFAULT_LEAGUES.keys()), index=0)
-        league_id = None if league_label == "Auto" else DEFAULT_LEAGUES[league_label]
+        league_map = {
+            "Auto (Italia)": None,
+            "Serie A (ID 135)": 135,
+            "Serie B (ID 136)": 136,
+            "Coppa Italia (ID 137)": 137,
+        }
+        league_label = st.selectbox("Campionato (consigliato)", list(league_map.keys()), index=0)
+        league_id = league_map[league_label]
 
-    # persist
-    st.session_state["match_text"] = match_text
+    season = season_for_today(datetime.now(timezone.utc))
+    st.caption(f"Stagione stimata: {season}/{season+1} | League ID: {league_id if league_id else 'Auto'}")
 
-    btn = st.button("🔎 Analizza", type="primary", use_container_width=True)
+    analyze = st.button("🔎 Analizza", use_container_width=True)
 
-    if btn:
-        if not api_football_key:
-            st.error("Manca API_FOOTBALL_KEY nei Secrets di Streamlit. Vai su Settings → Secrets e aggiungila.")
+    with st.expander("🔧 DEBUG (solo se serve)"):
+        st.write("API_FOOTBALL_KEY presente:", bool(API_FOOTBALL_KEY))
+        st.write("THE_ODDS_API_KEY presente:", bool(THE_ODDS_API_KEY))
+        if API_FOOTBALL_KEY:
+            r, js = api_get("/status", {})
+            st.write("DEBUG /status code:", getattr(r, "status_code", None))
+            st.json(js)
+
+    if analyze:
+        home_raw, away_raw = split_match_input(match_text)
+        if not home_raw or not away_raw:
+            st.error("Inserisci la partita in formato tipo: Inter - Napoli")
             st.stop()
 
-        parsed = parse_match_input(match_text)
-        if not parsed:
-            st.error("Scrivi la partita in formato tipo: 'Juve - Atalanta' oppure 'Juve-Atalanta'.")
+        country = "Italy"
+        # 1) risolvi team ids in modo robusto
+        home_id, home_name, home_js = get_team_id(home_raw, country=country, league=league_id, season=season)
+        away_id, away_name, away_js = get_team_id(away_raw, country=country, league=league_id, season=season)
+
+        if not home_id or not away_id:
+            st.error("Non riesco a trovare le squadre. Prova a scrivere il nome più completo (es. 'AC Milan' invece di 'Milan').")
+            with st.expander("Dettagli tecnici (search)"):
+                st.write("HOME search response:")
+                st.json(home_js)
+                st.write("AWAY search response:")
+                st.json(away_js)
             st.stop()
 
-        team_a_name, team_b_name = parsed
-        with st.spinner("Cerco squadre su API-FOOTBALL..."):
-            a_candidates = search_team(api_football_key, team_a_name)
-            b_candidates = search_team(api_football_key, team_b_name)
+        # 2) prendi ultimi match (fallback forte)
+        last_n = 8
+        home_fx = cached_fixtures({"team": home_id, "season": season, "last": last_n}).get("response", [])
+        away_fx = cached_fixtures({"team": away_id, "season": season, "last": last_n}).get("response", [])
 
-        if not a_candidates:
-            st.error(f"Non trovo la squadra: {team_a_name}")
-            st.stop()
-        if not b_candidates:
-            st.error(f"Non trovo la squadra: {team_b_name}")
-            st.stop()
+        # se stagione stimata è "vuota" (inizio stagione), prova anche season-1
+        if len(home_fx) < 3:
+            home_fx2 = cached_fixtures({"team": home_id, "season": season - 1, "last": last_n}).get("response", [])
+            home_fx = home_fx or home_fx2
+        if len(away_fx) < 3:
+            away_fx2 = cached_fixtures({"team": away_id, "season": season - 1, "last": last_n}).get("response", [])
+            away_fx = away_fx or away_fx2
 
-        # pick first best match by normalized name
-        def pick_best(cands: List[Dict[str, Any]], q: str) -> Dict[str, Any]:
-            qn = norm_team_name(q)
-            best = cands[0]
-            best_score = -1
-            for c in cands:
-                name = (c.get("team", {}) or {}).get("name", "") or ""
-                nn = norm_team_name(name)
-                # score: exact contains + length
-                score = 0
-                if nn == qn:
-                    score += 100
-                if qn in nn:
-                    score += 40
-                score += max(0, 20 - abs(len(nn) - len(qn)))
-                if score > best_score:
-                    best_score = score
-                    best = c
-            return best
+        home_stats = compute_team_form_from_fixtures(home_fx, home_id)
+        away_stats = compute_team_form_from_fixtures(away_fx, away_id)
 
-        a_team = pick_best(a_candidates, team_a_name)
-        b_team = pick_best(b_candidates, team_b_name)
+        # 3) infortuni/squalifiche (API: injuries)
+        inj_params_home = {"team": home_id, "season": season}
+        inj_params_away = {"team": away_id, "season": season}
+        if league_id:
+            inj_params_home["league"] = league_id
+            inj_params_away["league"] = league_id
 
-        a_id = (a_team.get("team", {}) or {}).get("id")
-        b_id = (b_team.get("team", {}) or {}).get("id")
-        a_real = (a_team.get("team", {}) or {}).get("name", team_a_name)
-        b_real = (b_team.get("team", {}) or {}).get("name", team_b_name)
+        home_inj = cached_injuries(inj_params_home).get("response", [])
+        away_inj = cached_injuries(inj_params_away).get("response", [])
 
-        if not a_id or not b_id:
-            st.error("Errore: ID squadra non disponibile (risposta API inconsistente).")
-            st.stop()
-
-        season = season_for_date(now_utc())
-
-        with st.spinner("Cerco fixture (smart) e ultimi match per forma..."):
-            pick = find_fixture_smart(api_football_key, a_id, b_id, league_id)
-            # last fixtures per forma (fallback sempre disponibile)
-            a_last = get_team_last_fixtures(api_football_key, a_id, pick.season, last=10)
-            b_last = get_team_last_fixtures(api_football_key, b_id, pick.season, last=10)
-
-            a_sum = summarize_form(a_last, a_id)
-            b_sum = summarize_form(b_last, b_id)
-
-            # injuries (best effort)
-            # se league_id è Auto -> proviamo senza league per evitare vuoti
-            inj_a = get_injuries(api_football_key, a_id, pick.season, league_id if league_id else None)
-            inj_b = get_injuries(api_football_key, b_id, pick.season, league_id if league_id else None)
-
+        # 4) build UI
         st.success("✅ Analisi pronta")
 
-        # Header match
-        fixture_note = pick.message
-        if pick.fixture:
-            fx = pick.fixture
-            fx_date = ((fx.get("fixture", {}) or {}).get("date")) or ""
-            league = fx.get("league", {}) or {}
-            st.markdown(
-                f"""
-<div class="card">
-<b>{a_real} vs {b_real}</b><br/>
-<span class="small-muted">Fixture trovata: {fx_date} | League: {league.get("name","?")} (ID {league.get("id","?")}) | Stagione: {pick.season}/{pick.season+1}</span><br/>
-<span class="small-muted">{fixture_note}</span>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"""
-<div class="card">
-<b>{a_real} vs {b_real}</b><br/>
-<span class="small-muted">Stagione stimata: {pick.season}/{pick.season+1} | League: {league_label}</span><br/>
-<span class="small-muted">{fixture_note}</span>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
+        st.markdown(f"### {home_name} vs {away_name}")
 
-        c1, c2 = st.columns(2, gap="large")
-
-        def team_block(title: str, s: Dict[str, Any], inj_count: int):
-            stars = "★" * min(5, max(1, int(round(clamp(s["ppg"], 0.0, 3.0) / 0.6))))
-            st.markdown(f"### {title}")
-            st.write(f"- Forma (ultimi {s['matches']}): **{stars}**  ({s['form']})")
-            st.write(f"- Punti: **{s['points']}**  (PPG: **{s['ppg']:.2f}**)")
-            st.write(f"- Gol fatti/subiti: **{s['gf']} / {s['ga']}**")
-            st.write(f"- Media gol totali: **{s['avg_total_goals']:.2f}**")
-            st.write(f"- Infortunati/Squalificati (da API, se disponibili): **{inj_count}**")
-
+        c1, c2 = st.columns(2)
         with c1:
-            team_block(f"🏠 {a_real}", a_sum, len(inj_a))
+            st.markdown(f"## 🏠 {home_name}")
+            st.write(f"• Forma (ultimi {home_stats['played']}): **{stars_from_ppg(home_stats['ppg'])}**")
+            st.write(f"• Punti: **{home_stats['points']}** (PPG: **{home_stats['ppg']:.2f}**)")
+            st.write(f"• Gol fatti/subiti: **{home_stats['gf']} / {home_stats['ga']}**")
+            st.write(f"• Media gol totali (match team): **{home_stats['avg_total_goals']:.2f}**")
+            st.write(f"• Infortunati/Squalificati (da API, se disponibili): **{len(home_inj)}**")
+
         with c2:
-            team_block(f"✈️ {b_real}", b_sum, len(inj_b))
+            st.markdown(f"## ✈️ {away_name}")
+            st.write(f"• Forma (ultimi {away_stats['played']}): **{stars_from_ppg(away_stats['ppg'])}**")
+            st.write(f"• Punti: **{away_stats['points']}** (PPG: **{away_stats['ppg']:.2f}**)")
+            st.write(f"• Gol fatti/subiti: **{away_stats['gf']} / {away_stats['ga']}**")
+            st.write(f"• Media gol totali (match team): **{away_stats['avg_total_goals']:.2f}**")
+            st.write(f"• Infortunati/Squalificati (da API, se disponibili): **{len(away_inj)}**")
 
-        st.markdown("---")
-        st.markdown("## 🧠 Suggerimenti (trasparenti, **NON certezze**)")
-        for s in suggest_markets(a_sum, b_sum):
-            st.write(f"- {s}")
+        # media combinata semplice
+        combined_avg = (home_stats["avg_total_goals"] + away_stats["avg_total_goals"]) / 2.0
+        st.divider()
 
-        with st.expander("📌 Dettagli tecnici (solo se serve)", expanded=False):
-            st.write("Ultimi fixtures Team A:", len(a_last))
-            st.write("Ultimi fixtures Team B:", len(b_last))
-            st.write("Injuries A:", len(inj_a))
-            st.write("Injuries B:", len(inj_b))
+        st.markdown("## 🧠 Suggerimenti (trasparenti, NON certezze)")
+        suggestions = build_suggestions(combined_avg, home_stats["ppg"], away_stats["ppg"])
+        for s in suggestions:
+            st.write(f"• {s}")
 
-# -----------------------------
-# TAB 2: TRADING STOP MANUALE
-# -----------------------------
-with tabs[1]:
-    st.subheader("🧮 Trading / Stop (Manuale)")
-    st.caption("Qui inserisci TU quote e importi reali (Betflag/Exchange). Nessuna API necessaria.")
+        with st.expander("📌 Dettagli tecnici (solo se serve)"):
+            st.write("Team IDs risolti:")
+            st.code(f"{home_name} -> {home_id}\n{away_name} -> {away_id}")
+            st.write("Ultimi fixtures HOME (count):", len(home_fx))
+            st.write("Ultimi fixtures AWAY (count):", len(away_fx))
+            st.write("Injuries HOME (count):", len(home_inj))
+            st.write("Injuries AWAY (count):", len(away_inj))
 
-    # Inputs stable on phone
-    col1, col2 = st.columns(2, gap="large")
+# =========================
+# TAB 2 — TRADING / STOP
+# =========================
+with tab2:
+    st.subheader("📈 Trading / Stop (Manuale) — tu inserisci le quote live")
 
-    with col1:
-        back_stake = st.number_input("Puntata d’ingresso (€)", min_value=1.0, value=float(st.session_state.get("back_stake", 10.0)), step=1.0)
-        comm_pct = st.number_input("Commissione exchange (%)", min_value=0.0, max_value=20.0, value=float(st.session_state.get("comm_pct", 5.0)), step=0.5)
-    with col2:
-        back_odds = st.number_input("Quota d’ingresso (reale)", min_value=1.01, value=float(st.session_state.get("back_odds", 1.80)), step=0.01, format="%.2f")
-        market_label = st.selectbox(
-            "Che cosa stai giocando?",
-            options=["Over 1.5", "Over 2.5", "Over 3.5", "Over 4.5", "Under 3.5", "Under 4.5", "Over 5.5", "Under 5.5", "Goal", "No Goal"],
-            index=0,
-        )
-
-    st.session_state["back_stake"] = back_stake
-    st.session_state["back_odds"] = back_odds
-    st.session_state["comm_pct"] = comm_pct
-
-    max_loss_if_lose = st.number_input("Perdita max se PERDI (€)", min_value=0.0, value=float(st.session_state.get("max_loss", 5.0)), step=0.5)
-    min_profit_if_win = st.number_input("Profitto minimo se VINCI (€)", min_value=0.0, value=float(st.session_state.get("min_profit", 1.0)), step=0.5)
-
-    st.session_state["max_loss"] = max_loss_if_lose
-    st.session_state["min_profit"] = min_profit_if_win
-
-    st.markdown(
-        """
-<div class="card">
-<b>📌 Nota importante (Over vs Under)</b><br/>
-Il calcolo della bancata è uguale per Over e Under: stai sempre facendo <i>BACK</i> e poi <i>LAY</i> sullo stesso mercato.<br/>
-<b>Regola pratica:</b> lo STOP lo usi quando la quota del tuo mercato <b>SALE</b> (ti sta andando contro).
-</div>
-""",
-        unsafe_allow_html=True,
+    st.info(
+        "✅ Logica corretta: tu scegli **Perdita max se PERDI** e **Profitto minimo se VINCI**.\n"
+        "L’app ti calcola: **quanto bancare** e **fino a che quota stop puoi aspettare**.\n"
+        "In più: puoi calcolare l’**uscita adesso** (green-up tipo cashout) inserendo la quota live."
     )
 
-    stop_steps = [25, 35, 50]  # puoi cambiare qui facilmente
-    st.markdown("## 🛑 Quote STOP pronte (ti prepari prima)")
+    market = st.selectbox(
+        "Che cosa stai giocando?",
+        [
+            "Over 1.5", "Over 2.5", "Over 3.5", "Over 4.5", "Over 5.5",
+            "Under 2.5", "Under 3.5", "Under 4.5", "Under 5.5",
+            "Goal (GG)", "No Goal (NG)"
+        ],
+        index=1
+    )
 
-    if st.button("✅ CALCOLA (aggiorna risultati)", type="primary", use_container_width=True):
-        plan = make_stop_plan(
-            back_stake=back_stake,
-            back_odds=back_odds,
-            comm_pct=comm_pct,
-            max_loss_if_lose=max_loss_if_lose,
-            min_profit_if_win=min_profit_if_win,
-            stop_steps=stop_steps,
+    col1, col2 = st.columns(2)
+    with col1:
+        back_stake = st.number_input("Puntata d’ingresso (€)", min_value=1.0, value=10.0, step=1.0, format="%.2f")
+        commission_pct = st.number_input("Commissione exchange (%)", min_value=0.0, max_value=20.0, value=5.0, step=0.5, format="%.2f")
+    with col2:
+        back_odds = st.number_input("Quota d’ingresso (reale)", min_value=1.01, value=1.70, step=0.01, format="%.2f")
+        max_loss_if_lose = st.number_input("Perdita max se PERDI (€)", min_value=0.0, value=4.0, step=0.5, format="%.2f")
+
+    min_profit_if_win = st.number_input("Profitto minimo se VINCI (€)", min_value=0.0, value=1.0, step=0.5, format="%.2f")
+
+    commission = commission_pct / 100.0
+
+    st.divider()
+    st.markdown("## 🛑 Piano STOP (ti prepari prima)")
+
+    lay_stake = lay_stake_for_max_loss_if_lose(back_stake, max_loss_if_lose, commission)
+
+    if lay_stake is None:
+        st.error(
+            "Impossibile con questi vincoli.\n\n"
+            "👉 Tipicamente succede se:\n"
+            "• Perdita max è troppo bassa rispetto alla puntata (es. vuoi perdere 2€ su 10€ e commissione alta)\n"
+            "• Oppure vuoi un profitto minimo troppo alto.\n\n"
+            "Prova: aumenta puntata, aumenta perdita max, oppure abbassa profitto minimo."
         )
+    else:
+        # stop odds massimo accettabile per mantenere profitto minimo
+        stop_odds_max = max_lay_odds_allowed(back_stake, back_odds, lay_stake, min_profit_if_win)
 
-        # Table-friendly
-        st.dataframe(plan, use_container_width=True)
-
-        # “Uscita adesso” (se inserisci quota live)
-        st.markdown("## 🚪 Uscita adesso (se sei già LIVE)")
-        live_odds = st.number_input("Quota LIVE attuale (LAY odds)", min_value=1.01, value=float(st.session_state.get("live_odds", back_odds)), step=0.01, format="%.2f")
-        st.session_state["live_odds"] = live_odds
-
-        comm = comm_pct / 100.0
-        lay_stake_ = lay_stake_for_target_loss_when_lose(back_stake, max_loss_if_lose)
-        if lay_stake_ <= 0:
-            st.warning("Perdita max troppo bassa rispetto alla puntata: non c’è una bancata che limiti la perdita come vuoi.")
+        if stop_odds_max is None or stop_odds_max <= 1.01:
+            st.error("Impossibile rispettare il profitto minimo con questi numeri.")
         else:
-            win_p = pnl_if_win(back_stake, back_odds, lay_stake_, live_odds, comm)
-            lose_p = pnl_if_lose(back_stake, lay_stake_, comm)
-            liab = lay_liability(lay_stake_, live_odds)
+            st.success("✅ Piano STOP calcolato")
 
-            st.markdown(
-                f"""
-<div class="card">
-<b>{market_label}</b><br/>
-<b>BANCA consigliata adesso:</b> {lay_stake_:.2f} € @ {live_odds:.2f}<br/>
-<b>Liability (rischio se esce il mercato):</b> {liab:.2f} €<br/><br/>
-<b>Esiti stimati:</b><br/>
-- Se VINCI: <b>{win_p:+.2f} €</b><br/>
-- Se PERDI: <b>{lose_p:+.2f} €</b><br/>
-<span class="small-muted">Nota: stima semplificata con commissione applicata solo su profitto positivo.</span>
-</div>
-""",
-                unsafe_allow_html=True,
+            st.write(f"**Mercato:** {market}")
+            st.write(f"**Banca consigliata (stake lay):** **{fmt2(lay_stake)} €**")
+            st.write(f"**Quota STOP massima (lay):** **{fmt2(stop_odds_max)}**")
+            st.caption("Regola pratica: usi lo STOP quando la quota del tuo mercato **SALE** (ti sta andando contro).")
+
+            # Mostra outcome per alcuni stop (percentuali)
+            stop_pcts = [0.15, 0.25, 0.35, 0.50, 0.75]
+            rows = []
+            for p in stop_pcts:
+                q = back_odds * (1 + p)
+                if q > stop_odds_max:
+                    note = "❌ Oltre la tua quota STOP max"
+                    rows.append([f"+{int(p*100)}%", fmt2(q), "—", "—", "—", note])
+                    continue
+
+                win, lose = outcomes(back_stake, back_odds, lay_stake, q, commission)
+                rows.append([f"+{int(p*100)}%", fmt2(q), fmt2(lay_stake), fmt2(win), fmt2(lose), "OK"])
+
+            st.markdown("### Quote STOP pronte (esempi)")
+            st.dataframe(
+                rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    0: "Stop",
+                    1: "Quota stop (lay)",
+                    2: "Banca consigliata (€)",
+                    3: "Esito se VINCI (€)",
+                    4: "Esito se PERDI (€)",
+                    5: "Note",
+                }
             )
 
-    else:
-        st.info("Imposta i valori e premi **CALCOLA**.")
+    st.divider()
+    st.markdown("## 🚪 Uscita ADESSO (green-up tipo cashout)")
 
-# =============================
-# The Odds API (opzionale)
-# =============================
-# Lasciata fuori dall'analisi per evitare confusione:
-# Qui usiamo manuale per quote (come mi hai chiesto).
-# Se vuoi reinserire quote automatiche in un secondo momento, lo facciamo in modo “safe”.
+    lay_odds_now = st.number_input("Quota LIVE attuale per bancare (lay)", min_value=1.01, value=2.00, step=0.01, format="%.2f")
+    calc_exit = st.button("✅ Calcola uscita adesso", use_container_width=True)
+
+    if calc_exit:
+        Lg = greenup_lay_stake(back_stake, back_odds, lay_odds_now, commission)
+        if Lg is None or Lg <= 0:
+            st.error("Impossibile calcolare green-up con questi valori (quota troppo bassa o commissione troppo alta).")
+        else:
+            win_g, lose_g = outcomes(back_stake, back_odds, Lg, lay_odds_now, commission)
+            st.success("✅ Uscita calcolata (profitto simile in entrambi gli esiti)")
+            st.write(f"**Banca (stake lay) per uscire adesso:** **{fmt2(Lg)} €** @ **{fmt2(lay_odds_now)}**")
+            st.write(f"**Esito se VINCI:** {fmt2(win_g)} €")
+            st.write(f"**Esito se PERDI:** {fmt2(lose_g)} €")
+            st.caption("Nota: è una 'stima' matematica. In reale contano liquidità/abbinamento e scostamenti quota.")
+
+    st.divider()
+    st.markdown("### ✅ Nota importante (Over vs Under)")
+    st.write("Il calcolo della bancata è **uguale** per Over e Under: stai sempre coprendo **lo stesso mercato** con una bancata.")
+    st.write("Regola pratica: lo STOP lo usi quando la quota del tuo mercato **SALE** (ti va contro).")
+
+# Footer
+st.caption("© Tool educativo. Nessun consiglio di scommessa certo. Usalo con responsabilità.")
