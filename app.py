@@ -2,6 +2,8 @@
 # Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)
 # ✅ FIX: ricerca fixture "intelligente" (range ampio + next/last fallback) per evitare "tutto 0".
 # ✅ Usa API-FOOTBALL (api-sports) + (opzionale) The Odds API per quote (se vuoi).
+# ✅ UPDATE: Consigli più "operativi": ti propone 1 giocata PRINCIPALE + 2 alternative (prudente/aggressiva)
+#            + aggiunge Goal/NoGoal (BTTS) e Double Chance "più coerente", sempre con motivazione e percentuali.
 #
 # --- STREAMLIT SECRETS (Settings → Secrets su Streamlit Cloud) ---
 # THE_ODDS_API_KEY = "la_tua_key_odds_api"          # opzionale
@@ -41,27 +43,22 @@ DEFAULT_LEAGUES = {
 # UTILS
 # =============================
 
-
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
-
 
 def season_for_date(dt: datetime) -> int:
     # Calcio: stagione "anno inizio" tipicamente da luglio.
     # Esempio: Feb 2026 -> season 2025
     return dt.year if dt.month >= 7 else dt.year - 1
 
-
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
-
 
 def norm_team_name(s: str) -> str:
     s = s.strip().lower()
     s = re.sub(r"[^a-z0-9\s\-]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
 
 def parse_match_input(text: str) -> Optional[Tuple[str, str]]:
     if not text or not text.strip():
@@ -75,10 +72,8 @@ def parse_match_input(text: str) -> Optional[Tuple[str, str]]:
             return parts[0], parts[1]
     return None
 
-
 def api_football_headers(api_key: str) -> Dict[str, str]:
     return {"x-apisports-key": api_key}
-
 
 def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], timeout: int = 25) -> Dict[str, Any]:
     r = requests.get(url, headers=headers, params=params, timeout=timeout)
@@ -90,6 +85,10 @@ def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], tim
     data["_url"] = r.url
     return data
 
+def pct(n: int, d: int) -> float:
+    if d <= 0:
+        return 0.0
+    return 100.0 * (n / d)
 
 # =============================
 # API-FOOTBALL (API-SPORTS)
@@ -101,20 +100,17 @@ def search_team(api_key: str, query: str) -> List[Dict[str, Any]]:
     data = http_get_json(url, api_football_headers(api_key), {"search": query})
     return data.get("response", []) or []
 
-
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_team_last_fixtures(api_key: str, team_id: int, season: int, last: int = 10) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/fixtures"
     data = http_get_json(url, api_football_headers(api_key), {"team": team_id, "season": season, "last": last})
     return data.get("response", []) or []
 
-
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_team_next_fixtures(api_key: str, team_id: int, season: int, nxt: int = 20) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/fixtures"
     data = http_get_json(url, api_football_headers(api_key), {"team": team_id, "season": season, "next": nxt})
     return data.get("response", []) or []
-
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_fixtures_in_range(
@@ -139,7 +135,6 @@ def get_fixtures_in_range(
     resp = data.get("response", []) or []
     return resp[:limit]
 
-
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[int]) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/injuries"
@@ -149,20 +144,17 @@ def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[in
     data = http_get_json(url, api_football_headers(api_key), params)
     return data.get("response", []) or []
 
-
 def fixture_match_teams(fx: Dict[str, Any], a_id: int, b_id: int) -> bool:
     teams = fx.get("teams", {}) or {}
     home = (teams.get("home", {}) or {}).get("id")
     away = (teams.get("away", {}) or {}).get("id")
     return (home == a_id and away == b_id) or (home == b_id and away == a_id)
 
-
 @dataclass
 class FixturePick:
     fixture: Optional[Dict[str, Any]]
     message: str
     season: int
-
 
 def find_fixture_smart(
     api_key: str,
@@ -183,13 +175,11 @@ def find_fixture_smart(
     from_dt = dt - timedelta(days=30)
     to_dt = dt + timedelta(days=90)
 
-    # 1) Range ampio su team A
     fx_range = get_fixtures_in_range(api_key, team_a_id, from_dt, to_dt, season, league_id=league_id)
     for fx in fx_range:
         if fixture_match_teams(fx, team_a_id, team_b_id):
             return FixturePick(fixture=fx, message="Fixture trovata nel range (-30/+90 giorni).", season=season)
 
-    # 2) Next su A
     fx_next_a = get_team_next_fixtures(api_key, team_a_id, season, nxt=25)
     for fx in fx_next_a:
         if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
@@ -197,7 +187,6 @@ def find_fixture_smart(
         if fixture_match_teams(fx, team_a_id, team_b_id):
             return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT del Team A.", season=season)
 
-    # 3) Next su B
     fx_next_b = get_team_next_fixtures(api_key, team_b_id, season, nxt=25)
     for fx in fx_next_b:
         if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
@@ -211,7 +200,6 @@ def find_fixture_smart(
         season=season,
     )
 
-
 # =============================
 # ANALISI (semplice, trasparente)
 # =============================
@@ -223,22 +211,14 @@ def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[st
       - gol fatti/subiti
       - media gol totali partita
       - stringa forma (W/D/L)
+      - features per mercati: tot_goals_list, btts_list
     """
-    if not last_fixtures:
-        return {
-            "matches": 0,
-            "points": 0,
-            "ppg": 0.0,
-            "gf": 0,
-            "ga": 0,
-            "avg_total_goals": 0.0,
-            "form": "",
-        }
-
     pts = 0
     gf = 0
     ga = 0
-    form = []
+    form: List[str] = []
+    totals: List[int] = []
+    btts: List[bool] = []
 
     for fx in last_fixtures:
         teams = fx.get("teams", {}) or {}
@@ -252,24 +232,29 @@ def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[st
         if gh is None or ga_ is None:
             continue
 
+        gh_i = int(gh)
+        ga_i = int(ga_)
+        totals.append(gh_i + ga_i)
+        btts.append(gh_i > 0 and ga_i > 0)
+
         if home == team_id:
-            gf += int(gh)
-            ga += int(ga_)
-            if gh > ga_:
+            gf += gh_i
+            ga += ga_i
+            if gh_i > ga_i:
                 pts += 3
                 form.append("W")
-            elif gh == ga_:
+            elif gh_i == ga_i:
                 pts += 1
                 form.append("D")
             else:
                 form.append("L")
         elif away == team_id:
-            gf += int(ga_)
-            ga += int(gh)
-            if ga_ > gh:
+            gf += ga_i
+            ga += gh_i
+            if ga_i > gh_i:
                 pts += 3
                 form.append("W")
-            elif ga_ == gh:
+            elif ga_i == gh_i:
                 pts += 1
                 form.append("D")
             else:
@@ -285,6 +270,8 @@ def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[st
             "ga": 0,
             "avg_total_goals": 0.0,
             "form": "",
+            "totals": [],
+            "btts": [],
         }
 
     avg_total_goals = (gf + ga) / played
@@ -296,61 +283,146 @@ def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[st
         "ga": ga,
         "avg_total_goals": avg_total_goals,
         "form": "".join(form[-5:]),
+        "totals": totals[-played:],  # all played totals
+        "btts": btts[-played:],
     }
 
+def market_rates_from_summary(s: Dict[str, Any]) -> Dict[str, float]:
+    totals = s.get("totals", []) or []
+    btts = s.get("btts", []) or []
+    n = len(totals)
+    if n == 0:
+        return {
+            "o15": 0.0, "o25": 0.0, "o35": 0.0,
+            "u35": 0.0, "u45": 0.0,
+            "btts_yes": 0.0,
+        }
+    o15 = sum(1 for t in totals if t >= 2) / n
+    o25 = sum(1 for t in totals if t >= 3) / n
+    o35 = sum(1 for t in totals if t >= 4) / n
+    u35 = sum(1 for t in totals if t <= 3) / n
+    u45 = sum(1 for t in totals if t <= 4) / n
+    btts_yes = sum(1 for x in btts if x) / n
+    return {
+        "o15": o15, "o25": o25, "o35": o35,
+        "u35": u35, "u45": u45,
+        "btts_yes": btts_yes,
+    }
 
-# =============================
-# CONSIGLI (più chiari + specifici)
-# =============================
+def combine_rates(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
+    keys = set(a.keys()) | set(b.keys())
+    out = {}
+    for k in keys:
+        out[k] = (a.get(k, 0.0) + b.get(k, 0.0)) / 2.0
+    return out
 
-def suggest_markets_structured(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, List[str]]:
+def label_risk(market: str) -> str:
+    # Etichette semplici (non “verità”, solo percezione rischio)
+    safe = {"Over 1.5", "Under 4.5", "Under 3.5", "1X", "X2", "12"}
+    medium = {"Over 2.5", "Goal (BTTS Sì)", "No Goal (BTTS No)"}
+    agg = {"Over 3.5"}
+    if market in safe:
+        return "🟩 Prudente"
+    if market in medium:
+        return "🟨 Medio"
+    if market in agg:
+        return "🟥 Aggressivo"
+    return "🟦 Neutro"
+
+def recommend_for_match(a_sum: Dict[str, Any], b_sum: Dict[str, Any], home_is_a: bool = True) -> Dict[str, Any]:
     """
-    Ritorna 2 liste:
-      - goals: over/under specifici
-      - result: 1X2 / doppia chance con spiegazione semplice
+    Output:
+      - primary: {market, why, strength, risk}
+      - alternatives: [..]
+      - outcome: {market, why}
+      - meta: rates/avg
     """
-    goals: List[str] = []
-    result: List[str] = []
+    a_rates = market_rates_from_summary(a_sum)
+    b_rates = market_rates_from_summary(b_sum)
+    r = combine_rates(a_rates, b_rates)
 
-    avg_goals = (a["avg_total_goals"] + b["avg_total_goals"]) / 2.0
-    ppg_diff = abs(a["ppg"] - b["ppg"])
+    avg_goals = (a_sum.get("avg_total_goals", 0.0) + b_sum.get("avg_total_goals", 0.0)) / 2.0
 
-    # --- GOALS: consigli specifici ---
-    if avg_goals >= 3.6:
-        goals.append("📈 Media gol **molto alta** → più coerente: **Over 3.5**.")
-        goals.append("🛡️ Se vuoi più prudenza: **Under 4.5** (copre partite da 4 gol).")
-    elif avg_goals >= 3.0:
-        goals.append("📈 Media gol **alta** → consiglio principale: **Over 2.5**.")
-        goals.append("🛡️ Alternativa prudente: **Under 4.5**.")
-    elif avg_goals >= 2.4:
-        goals.append("📊 Media gol **media** → linea prudente: **Over 1.5**.")
-        goals.append("🛡️ Se vuoi coprire gli eccessi: **Under 4.5**.")
-    elif avg_goals >= 2.0:
-        goals.append("📉 Media gol **bassa** → più sensato: **Under 3.5**.")
-        goals.append("✅ Linea prudente alternativa: **Over 1.5** solo se quota buona.")
+    # 1) scegli “miglior” linea goal based su coerenza
+    # logica: se o25 alto -> Over 2.5; se basso e u35 alto -> Under 3.5/Under 2.5 (qui usiamo Under 3.5)
+    # se in mezzo -> Over 1.5 + Under 4.5 (range 2-4 gol tipico)
+    primary = None
+    alt = []
+
+    # Regole pratiche
+    if r["o25"] >= 0.62 and avg_goals >= 2.7:
+        primary = ("Over 2.5", f"Negli ultimi match: Over 2.5 medio ≈ {r['o25']*100:.0f}% (A/B). Media gol ≈ {avg_goals:.2f}.")
+        alt = [
+            ("Under 4.5", f"Linea prudente: Under 4.5 medio ≈ {r['u45']*100:.0f}% (evita la partita “pazza”)."),
+            ("Over 3.5", f"Più aggressivo: Over 3.5 medio ≈ {r['o35']*100:.0f}% (serve match molto aperto)."),
+        ]
+    elif r["u35"] >= 0.70 and avg_goals <= 2.4:
+        primary = ("Under 3.5", f"Negli ultimi match: Under 3.5 medio ≈ {r['u35']*100:.0f}%. Media gol ≈ {avg_goals:.2f}.")
+        alt = [
+            ("Over 1.5", f"Alternativa prudente: Over 1.5 medio ≈ {r['o15']*100:.0f}% (basta 2 gol)."),
+            ("Under 4.5", f"Ancora più coperto: Under 4.5 medio ≈ {r['u45']*100:.0f}%."),
+        ]
     else:
-        goals.append("📉 Media gol **molto bassa** → più coerente: **Under 2.5**.")
-        goals.append("🛡️ Alternativa ancora più safe: **Under 3.5**.")
+        # zona “centrale”
+        primary = ("Over 1.5", f"Zona centrale: Over 1.5 medio ≈ {r['o15']*100:.0f}%. Media gol ≈ {avg_goals:.2f}.")
+        alt = [
+            ("Over 2.5", f"Se vuoi più quota: Over 2.5 medio ≈ {r['o25']*100:.0f}%."),
+            ("Under 4.5", f"Se vuoi copertura: Under 4.5 medio ≈ {r['u45']*100:.0f}% (range “normale”)."),
+        ]
 
-    goals.append("ℹ️ Nota pratica: queste sono linee “da guardare”, poi decidi con le **quote live**.")
-
-    # --- RESULT: 1X2 / doppia chance con spiegazione ---
-    if ppg_diff >= 1.2:
-        result.append("🏆 Differenza punti/forma **netta** → puoi valutare esito a favore della squadra più forte.")
-        result.append("👉 Opzioni tipiche: **1 fisso** (se gioca in casa) oppure **X2** (se la forte è in trasferta).")
-    elif ppg_diff >= 0.6:
-        result.append("⚖️ Differenza **moderata** → meglio **Doppia Chance** rispetto al secco 1X2.")
-        result.append("👉 Esempi: **1X** (casa non perde) oppure **X2** (trasferta non perde).")
+    # 2) Goal/NoGoal (BTTS) come extra
+    btts_yes = r["btts_yes"]
+    if btts_yes >= 0.62:
+        alt.append(("Goal (BTTS Sì)", f"Entrambe segnano spesso: BTTS Sì medio ≈ {btts_yes*100:.0f}%."))
+    elif btts_yes <= 0.40:
+        alt.append(("No Goal (BTTS No)", f"BTTS basso: BTTS Sì medio ≈ {btts_yes*100:.0f}% → più coerente No Goal."))
     else:
-        result.append("⚠️ Squadre **equilibrate** → il 1X2 è più “casino”. Meglio mercati gol o gestione live.")
-        result.append("👉 In questi casi spesso è più pulito lavorare con **Over/Under** o ingresso live.")
+        alt.append(("Goal/NoGoal", f"BTTS medio ≈ {btts_yes*100:.0f}% → decide meglio col LIVE."))
 
-    result.append("📌 Mini guida: **1X2** = scegli il risultato secco (1=Casa, X=Pareggio, 2=Trasferta).")
-    result.append("📌 **Doppia Chance** = prendi 2 risultati su 3 (1X, X2, 12) → più copertura, quota più bassa.")
-    result.append("ℹ️ Ricorda: sono letture su trend recenti, **NON** previsioni.")
+    # 3) Esito (1X2/Doppia Chance) — sempre prudente
+    # usiamo differenza PPG per “tendenza”
+    ppg_a = a_sum.get("ppg", 0.0)
+    ppg_b = b_sum.get("ppg", 0.0)
+    diff = ppg_a - ppg_b
 
-    return {"goals": goals, "result": result}
+    # Se A è casa (home_is_a=True): 1X se A meglio; X2 se B meglio
+    if home_is_a:
+        if diff >= 0.55:
+            outcome = ("1X", f"Casa più forte nei recenti: PPG {ppg_a:.2f} vs {ppg_b:.2f}. Doppia Chance riduce rischio.")
+        elif diff <= -0.55:
+            outcome = ("X2", f"Trasferta più forte nei recenti: PPG {ppg_b:.2f} vs {ppg_a:.2f}. Doppia Chance riduce rischio.")
+        else:
+            outcome = ("12", f"PPG simili ({ppg_a:.2f} vs {ppg_b:.2f}): match “aperto”. 12 evita il pareggio.")
+    else:
+        # se inverti casa/trasferta
+        if diff >= 0.55:
+            outcome = ("X2", f"Trasferta (A) più forte: PPG {ppg_a:.2f} vs {ppg_b:.2f}.")
+        elif diff <= -0.55:
+            outcome = ("1X", f"Casa (B) più forte: PPG {ppg_b:.2f} vs {ppg_a:.2f}.")
+        else:
+            outcome = ("12", f"PPG simili ({ppg_a:.2f} vs {ppg_b:.2f}).")
 
+    primary_market, primary_why = primary
+    primary_obj = {
+        "market": primary_market,
+        "why": primary_why,
+        "risk": label_risk(primary_market),
+    }
+
+    alternatives = []
+    seen = set([primary_market])
+    for m, why in alt:
+        if m in seen:
+            continue
+        seen.add(m)
+        alternatives.append({"market": m, "why": why, "risk": label_risk(m)})
+
+    return {
+        "primary": primary_obj,
+        "alternatives": alternatives[:4],  # non troppo lungo
+        "outcome": {"market": outcome[0], "why": outcome[1], "risk": label_risk(outcome[0])},
+        "meta": {"avg_goals": avg_goals, "rates": r},
+    }
 
 # =============================
 # TRADING / STOP (manuale)
@@ -359,13 +431,11 @@ def suggest_markets_structured(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str
 def lay_liability(lay_stake: float, lay_odds: float) -> float:
     return lay_stake * (lay_odds - 1.0)
 
-
 def pnl_if_win(back_stake: float, back_odds: float, lay_stake_: float, lay_odds_: float, comm: float) -> float:
     gross = back_stake * (back_odds - 1.0) - lay_liability(lay_stake_, lay_odds_)
     if gross > 0:
         gross = gross * (1.0 - comm)
     return gross
-
 
 def pnl_if_lose(back_stake: float, lay_stake_: float, comm: float) -> float:
     gross = -back_stake + lay_stake_
@@ -373,10 +443,8 @@ def pnl_if_lose(back_stake: float, lay_stake_: float, comm: float) -> float:
         gross = gross * (1.0 - comm)
     return gross
 
-
 def lay_stake_for_target_loss_when_lose(back_stake: float, target_loss: float) -> float:
     return max(0.0, back_stake - target_loss)
-
 
 def lay_odds_needed_for_min_profit_if_win(
     back_stake: float,
@@ -393,7 +461,6 @@ def lay_odds_needed_for_min_profit_if_win(
     if max_lay_odds <= 1.01:
         return None
     return max_lay_odds
-
 
 def make_stop_plan(
     back_stake: float,
@@ -469,7 +536,6 @@ def make_stop_plan(
 
     return plan
 
-
 # =============================
 # UI
 # =============================
@@ -487,6 +553,16 @@ h1, h2, h3 { letter-spacing: -0.02em; }
   background: rgba(255,255,255,0.03);
   border-radius: 16px;
   padding: 16px;
+  margin-bottom: 12px;
+}
+.badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.05);
+  font-size: 0.85rem;
+  margin-left: 8px;
 }
 </style>
 """,
@@ -494,8 +570,9 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 )
 
 st.title("⚽ Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)")
-st.caption("Analisi basata su dati recenti e disponibilità API. Non è una previsione certa.")
+st.caption("Analisi basata su dati recenti e disponibilità API. **Non è una previsione certa** (niente certezze).")
 
+# Secrets read
 secrets_keys = dict(st.secrets) if hasattr(st, "secrets") else {}
 api_football_key = secrets_keys.get("API_FOOTBALL_KEY", "")
 the_odds_key = secrets_keys.get("THE_ODDS_API_KEY", "")
@@ -514,7 +591,7 @@ tabs = st.tabs(["📊 Analisi partita (PRO)", "🧮 Trading / Stop (Manuale)"])
 # TAB 1: ANALISI PRO
 # -----------------------------
 with tabs[0]:
-    st.subheader("📊 Analisi partita (PRO)")
+    st.subheader("📊 Analisi partita (PRO) — dati reali da API-Football (API-Sports)")
 
     colA, colB = st.columns([2, 1], gap="large")
     with colA:
@@ -524,7 +601,6 @@ with tabs[0]:
         league_id = None if league_label == "Auto" else DEFAULT_LEAGUES[league_label]
 
     st.session_state["match_text"] = match_text
-
     btn = st.button("🔎 Analizza", type="primary", use_container_width=True)
 
     if btn:
@@ -538,6 +614,7 @@ with tabs[0]:
             st.stop()
 
         team_a_name, team_b_name = parsed
+
         with st.spinner("Cerco squadre su API-FOOTBALL..."):
             a_candidates = search_team(api_football_key, team_a_name)
             b_candidates = search_team(api_football_key, team_b_name)
@@ -582,6 +659,7 @@ with tabs[0]:
         with st.spinner("Cerco fixture (smart) e ultimi match per forma..."):
             pick = find_fixture_smart(api_football_key, a_id, b_id, league_id)
 
+            # last fixtures per forma (fallback sempre disponibile)
             a_last = get_team_last_fixtures(api_football_key, a_id, pick.season, last=10)
             b_last = get_team_last_fixtures(api_football_key, b_id, pick.season, last=10)
 
@@ -593,6 +671,7 @@ with tabs[0]:
 
         st.success("✅ Analisi pronta")
 
+        # Header match
         fixture_note = pick.message
         if pick.fixture:
             fx = pick.fixture
@@ -626,9 +705,9 @@ with tabs[0]:
             stars = "★" * min(5, max(1, int(round(clamp(s["ppg"], 0.0, 3.0) / 0.6))))
             st.markdown(f"### {title}")
             st.write(f"- Forma (ultimi {s['matches']}): **{stars}**  ({s['form']})")
-            st.write(f"- Punti: **{s['points']}**  (PPG: **{s['ppg']:.2f}**)")
-            st.write(f"- Gol fatti/subiti: **{s['gf']} / {s['ga']}**")
-            st.write(f"- Media gol totali: **{s['avg_total_goals']:.2f}**")
+            st.write(f"- Punti (ultimi {s['matches']}): **{s['points']}**  (PPG: **{s['ppg']:.2f}**)")
+            st.write(f"- Gol fatti/subiti (ultimi {s['matches']}): **{s['gf']} / {s['ga']}**")
+            st.write(f"- Media gol totali (ultimi {s['matches']}): **{s['avg_total_goals']:.2f}**")
             st.write(f"- Infortunati/Squalificati (da API, se disponibili): **{inj_count}**")
 
         with c1:
@@ -636,28 +715,83 @@ with tabs[0]:
         with c2:
             team_block(f"✈️ {b_real}", b_sum, len(inj_b))
 
+        # =========================
+        # CONSIGLI "OPERATIVI"
+        # =========================
         st.markdown("---")
-
-        tips = suggest_markets_structured(a_sum, b_sum)
-
         st.markdown("## 🧠 Consigli (chiari, **NON certezze**)")
 
-        colG, colR = st.columns(2, gap="large")
-        with colG:
-            st.markdown("### ⚽ Mercati Goal / Over / Under")
-            for s in tips["goals"]:
-                st.write(f"- {s}")
+        rec = recommend_for_match(a_sum, b_sum, home_is_a=True)
 
-        with colR:
+        primary = rec["primary"]
+        outcome = rec["outcome"]
+        alts = rec["alternatives"]
+        meta = rec["meta"]
+        rates = meta["rates"]
+
+        left, right = st.columns(2, gap="large")
+
+        with left:
+            st.markdown("### ⚽ Mercati Goal / Over / Under")
+            st.markdown(
+                f"""
+<div class="card">
+<b>🎯 Scelta consigliata:</b> <span class="badge">{primary['risk']}</span><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{primary['market']}</h3>
+<span class="small-muted">{primary['why']}</span><br/><br/>
+<span class="small-muted">Indicatori (ultimi 10+10): Over1.5 ≈ {rates['o15']*100:.0f}% · Over2.5 ≈ {rates['o25']*100:.0f}% · Over3.5 ≈ {rates['o35']*100:.0f}% · Under4.5 ≈ {rates['u45']*100:.0f}%</span>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+            for a in alts:
+                # mostriamo solo mercati goal/over/under/btts qui
+                if a["market"] in {"1X", "X2", "12"}:
+                    continue
+                st.markdown(
+                    f"""
+<div class="card">
+<b>Alternativa:</b> <span class="badge">{a['risk']}</span><br/>
+<b style="font-size:1.1rem;">{a['market']}</b><br/>
+<span class="small-muted">{a['why']}</span>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+
+        with right:
             st.markdown("### 🏁 Mercati Esito (1X2 / Doppia Chance)")
-            for s in tips["result"]:
-                st.write(f"- {s}")
+            st.markdown(
+                f"""
+<div class="card">
+<b>🎯 Scelta consigliata (prudente):</b> <span class="badge">{outcome['risk']}</span><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{outcome['market']}</h3>
+<span class="small-muted">{outcome['why']}</span><br/><br/>
+<span class="small-muted"><b>Mini guida:</b> 1X2 = 1(Casa) / X(Pareggio) / 2(Trasferta). Doppia Chance = prendi 2 risultati su 3 (1X, X2, 12) → più copertura, quota più bassa.</span>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+            st.markdown(
+                """
+<div class="card">
+<b>📌 Nota pratica</b><br/>
+Queste sono scelte “coerenti coi trend recenti”. Prima di entrare, guarda sempre anche:
+- quote LIVE (se il mercato è già “schiacciato” la value può sparire)
+- notizie last minute (turnover/infortuni reali, meteo, importanza match)
+</div>
+""",
+                unsafe_allow_html=True,
+            )
 
         with st.expander("📌 Dettagli tecnici (solo se serve)", expanded=False):
             st.write("Ultimi fixtures Team A:", len(a_last))
             st.write("Ultimi fixtures Team B:", len(b_last))
             st.write("Injuries A:", len(inj_a))
             st.write("Injuries B:", len(inj_b))
+            st.write("Rates (medio A/B):", {k: f"{v*100:.0f}%" for k, v in rates.items()})
 
 # -----------------------------
 # TAB 2: TRADING STOP MANUALE
@@ -669,10 +803,27 @@ with tabs[1]:
     col1, col2 = st.columns(2, gap="large")
 
     with col1:
-        back_stake = st.number_input("Puntata d’ingresso (€)", min_value=1.0, value=float(st.session_state.get("back_stake", 10.0)), step=1.0)
-        comm_pct = st.number_input("Commissione exchange (%)", min_value=0.0, max_value=20.0, value=float(st.session_state.get("comm_pct", 5.0)), step=0.5)
+        back_stake = st.number_input(
+            "Puntata d’ingresso (€)",
+            min_value=1.0,
+            value=float(st.session_state.get("back_stake", 10.0)),
+            step=1.0,
+        )
+        comm_pct = st.number_input(
+            "Commissione exchange (%)",
+            min_value=0.0,
+            max_value=20.0,
+            value=float(st.session_state.get("comm_pct", 5.0)),
+            step=0.5,
+        )
     with col2:
-        back_odds = st.number_input("Quota d’ingresso (reale)", min_value=1.01, value=float(st.session_state.get("back_odds", 1.80)), step=0.01, format="%.2f")
+        back_odds = st.number_input(
+            "Quota d’ingresso (reale)",
+            min_value=1.01,
+            value=float(st.session_state.get("back_odds", 1.80)),
+            step=0.01,
+            format="%.2f",
+        )
         market_label = st.selectbox(
             "Che cosa stai giocando?",
             options=["Over 1.5", "Over 2.5", "Over 3.5", "Over 4.5", "Under 3.5", "Under 4.5", "Over 5.5", "Under 5.5", "Goal", "No Goal"],
@@ -683,8 +834,18 @@ with tabs[1]:
     st.session_state["back_odds"] = back_odds
     st.session_state["comm_pct"] = comm_pct
 
-    max_loss_if_lose = st.number_input("Perdita max se PERDI (€)", min_value=0.0, value=float(st.session_state.get("max_loss", 5.0)), step=0.5)
-    min_profit_if_win = st.number_input("Profitto minimo se VINCI (€)", min_value=0.0, value=float(st.session_state.get("min_profit", 1.0)), step=0.5)
+    max_loss_if_lose = st.number_input(
+        "Perdita max se PERDI (€)",
+        min_value=0.0,
+        value=float(st.session_state.get("max_loss", 5.0)),
+        step=0.5,
+    )
+    min_profit_if_win = st.number_input(
+        "Profitto minimo se VINCI (€)",
+        min_value=0.0,
+        value=float(st.session_state.get("min_profit", 1.0)),
+        step=0.5,
+    )
 
     st.session_state["max_loss"] = max_loss_if_lose
     st.session_state["min_profit"] = min_profit_if_win
@@ -700,7 +861,7 @@ Il calcolo della bancata è uguale per Over e Under: stai sempre facendo <i>BACK
         unsafe_allow_html=True,
     )
 
-    stop_steps = [25, 35, 50]
+    stop_steps = [25, 35, 50]  # puoi cambiare qui facilmente
     st.markdown("## 🛑 Quote STOP pronte (ti prepari prima)")
 
     if st.button("✅ CALCOLA (aggiorna risultati)", type="primary", use_container_width=True):
@@ -716,7 +877,13 @@ Il calcolo della bancata è uguale per Over e Under: stai sempre facendo <i>BACK
         st.dataframe(plan, use_container_width=True)
 
         st.markdown("## 🚪 Uscita adesso (se sei già LIVE)")
-        live_odds = st.number_input("Quota LIVE attuale (LAY odds)", min_value=1.01, value=float(st.session_state.get("live_odds", back_odds)), step=0.01, format="%.2f")
+        live_odds = st.number_input(
+            "Quota LIVE attuale (LAY odds)",
+            min_value=1.01,
+            value=float(st.session_state.get("live_odds", back_odds)),
+            step=0.01,
+            format="%.2f",
+        )
         st.session_state["live_odds"] = live_odds
 
         comm = comm_pct / 100.0
