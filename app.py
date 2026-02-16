@@ -3,6 +3,7 @@
 # ✅ Modalità 1: "Partite del giorno" (max 10) + click per analisi
 # ✅ Modalità 2: Inserimento manuale partita (come prima)
 # ✅ Trading / Stop manuale (come prima)
+# ✅ AGGIUNTO: Champions League + Europa League (e Conference League opzionale)
 #
 # --- STREAMLIT SECRETS (Settings → Secrets su Streamlit Cloud) ---
 # API_FOOTBALL_KEY = "la_tua_key_api_football"      # obbligatoria
@@ -35,6 +36,10 @@ DEFAULT_LEAGUES: Dict[str, int] = {
     "Ligue 1 (FRA)": 61,
     "Eredivisie (NED)": 88,
     "Primeira Liga (POR)": 94,
+    # ✅ Coppe Europee
+    "Champions League": 2,
+    "Europa League": 3,
+    "Conference League": 848,  # opzionale ma utile
 }
 
 # =============================
@@ -151,9 +156,11 @@ def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[in
 def get_fixtures_by_date_and_league(api_key: str, day: str, league_id: int) -> List[Dict[str, Any]]:
     """
     day: 'YYYY-MM-DD'
+    ✅ Per Champions/Europa: la season è comunque "anno inizio" (es. 2025 per 2025/26)
     """
+    season = season_for_date(now_utc())
     url = f"{API_FOOTBALL_BASE}/fixtures"
-    params = {"date": day, "league": league_id, "season": season_for_date(now_utc())}
+    params = {"date": day, "league": league_id, "season": season}
     data = http_get_json(url, api_football_headers(api_key), params)
     return data.get("response", []) or []
 
@@ -178,13 +185,6 @@ def find_fixture_smart(
     team_b_id: int,
     league_id: Optional[int],
 ) -> FixturePick:
-    """
-    Strategia:
-      1) Range: -30 giorni / +90 giorni (stessa season stimata)
-      2) Next fixtures (25) del team A
-      3) Next fixtures (25) del team B
-      4) Se niente: fixture None (usiamo forma come fallback)
-    """
     dt = now_utc()
     season = season_for_date(dt)
 
@@ -325,7 +325,6 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
     r = combine_rates(h_rates, a_rates)
     avg_goals = (home_sum.get("avg_total_goals", 0.0) + away_sum.get("avg_total_goals", 0.0)) / 2.0
 
-    # Primary pick (Goal/Over/Under) più specifico
     if r["o25"] >= 0.62 and avg_goals >= 2.7:
         primary = ("Over 2.5", f"Trend gol alto: Over 2.5 medio ≈ {r['o25']*100:.0f}% (ultimi match). Media gol ≈ {avg_goals:.2f}.")
         alt = [
@@ -345,7 +344,6 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
             ("Under 4.5", f"Se vuoi più copertura: Under 4.5 ≈ {r['u45']*100:.0f}%."),
         ]
 
-    # BTTS suggestion
     btts_yes = r["btts_yes"]
     if btts_yes >= 0.62:
         alt.append(("Goal (BTTS Sì)", f"BTTS Sì alto: ≈ {btts_yes*100:.0f}%."))
@@ -354,7 +352,6 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
     else:
         alt.append(("Goal/NoGoal", f"BTTS medio ≈ {btts_yes*100:.0f}% → decide meglio col LIVE."))
 
-    # Doppia chance (spiegata)
     ppg_h = home_sum.get("ppg", 0.0)
     ppg_a = away_sum.get("ppg", 0.0)
     diff = ppg_h - ppg_a
@@ -386,16 +383,10 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
 
 
 # =============================
-# "TOP 10 DEL GIORNO" — short-list intelligente (non pronostici)
+# "TOP 10 DEL GIORNO"
 # =============================
 
 def clarity_score(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> float:
-    """
-    Score semplice per scegliere max 10 partite "più leggibili":
-    - trend gol (quanto si discosta da 2.5)
-    - BTTS estremo (molto alto o molto basso)
-    - differenza PPG (match sbilanciato è più leggibile)
-    """
     hr = market_rates_from_summary(home_sum)
     ar = market_rates_from_summary(away_sum)
     r = combine_rates(hr, ar)
@@ -480,7 +471,6 @@ def pnl_if_lose(back_stake: float, lay_stake_: float, comm: float) -> float:
 
 
 def lay_stake_for_target_loss_when_lose(back_stake: float, target_loss: float) -> float:
-    # Se PERDI: -back_stake + lay_stake = -target_loss  => lay_stake = back_stake - target_loss
     return max(0.0, back_stake - target_loss)
 
 
@@ -639,7 +629,7 @@ with tabs[0]:
     # ====== MODE 1: Partite del giorno ======
     with mode_tabs[0]:
         st.markdown("### 🗓️ Partite del giorno")
-        st.caption("Ti mostra massimo 10 partite “più leggibili” tra i campionati selezionati. Poi clicchi e analizzi.")
+        st.caption("Include anche Champions League ed Europa League (se ci sono match quel giorno).")
 
         cA, cB, cC = st.columns([2, 1, 1], gap="large")
         with cA:
@@ -648,7 +638,7 @@ with tabs[0]:
                 options=list(DEFAULT_LEAGUES.keys()),
                 default=st.session_state.get(
                     "selected_leagues",
-                    ["Premier League (ENG)", "Serie A (ITA)", "Bundesliga (GER)", "LaLiga (ESP)", "Ligue 1 (FRA)"],
+                    ["Premier League (ENG)", "Serie A (ITA)", "Bundesliga (GER)", "LaLiga (ESP)", "Ligue 1 (FRA)", "Champions League", "Europa League"],
                 ),
             )
         with cB:
@@ -675,13 +665,11 @@ with tabs[0]:
                         fx = get_fixtures_by_date_and_league(api_football_key, day_str, lid)
                         for f in fx:
                             status = (((f.get("fixture", {}) or {}).get("status", {}) or {}).get("short")) or ""
-                            # teniamo solo quelle "in programma" o comunque non concluse
                             if status in {"FT", "AET", "PEN", "CANC", "PST", "ABD"}:
                                 continue
                             all_fx.append(f)
 
-                    # Limitiamo per non fare troppe chiamate in serie (rate limit / velocità)
-                    all_fx = all_fx[:35]
+                    all_fx = all_fx[:40]
 
                     scored: List[Tuple[float, Dict[str, Any]]] = []
                     for fx in all_fx:
@@ -1002,6 +990,7 @@ with tabs[0]:
 """,
                         unsafe_allow_html=True,
                     )
+
             with right:
                 st.markdown("### 🏁 Esito (Doppia Chance)")
                 st.markdown(
@@ -1026,41 +1015,13 @@ with tabs[1]:
     col1, col2 = st.columns(2, gap="large")
 
     with col1:
-        back_stake = st.number_input(
-            "Puntata d’ingresso (€)",
-            min_value=1.0,
-            value=float(st.session_state.get("back_stake", 10.0)),
-            step=1.0,
-        )
-        comm_pct = st.number_input(
-            "Commissione exchange (%)",
-            min_value=0.0,
-            max_value=20.0,
-            value=float(st.session_state.get("comm_pct", 5.0)),
-            step=0.5,
-        )
+        back_stake = st.number_input("Puntata d’ingresso (€)", min_value=1.0, value=float(st.session_state.get("back_stake", 10.0)), step=1.0)
+        comm_pct = st.number_input("Commissione exchange (%)", min_value=0.0, max_value=20.0, value=float(st.session_state.get("comm_pct", 5.0)), step=0.5)
     with col2:
-        back_odds = st.number_input(
-            "Quota d’ingresso (reale)",
-            min_value=1.01,
-            value=float(st.session_state.get("back_odds", 1.80)),
-            step=0.01,
-            format="%.2f",
-        )
+        back_odds = st.number_input("Quota d’ingresso (reale)", min_value=1.01, value=float(st.session_state.get("back_odds", 1.80)), step=0.01, format="%.2f")
         market_label = st.selectbox(
             "Che cosa stai giocando?",
-            options=[
-                "Over 1.5",
-                "Over 2.5",
-                "Over 3.5",
-                "Over 4.5",
-                "Under 3.5",
-                "Under 4.5",
-                "Over 5.5",
-                "Under 5.5",
-                "Goal",
-                "No Goal",
-            ],
+            options=["Over 1.5", "Over 2.5", "Over 3.5", "Over 4.5", "Under 3.5", "Under 4.5", "Over 5.5", "Under 5.5", "Goal", "No Goal"],
             index=0,
         )
 
@@ -1068,18 +1029,9 @@ with tabs[1]:
     st.session_state["back_odds"] = back_odds
     st.session_state["comm_pct"] = comm_pct
 
-    max_loss_if_lose = st.number_input(
-        "Perdita max se PERDI (€)",
-        min_value=0.0,
-        value=float(st.session_state.get("max_loss", 5.0)),
-        step=0.5,
-    )
-    min_profit_if_win = st.number_input(
-        "Profitto minimo se VINCI (€)",
-        min_value=0.0,
-        value=float(st.session_state.get("min_profit", 1.0)),
-        step=0.5,
-    )
+    max_loss_if_lose = st.number_input("Perdita max se PERDI (€)", min_value=0.0, value=float(st.session_state.get("max_loss", 5.0)), step=0.5)
+    min_profit_if_win = st.number_input("Profitto minimo se VINCI (€)", min_value=0.0, value=float(st.session_state.get("min_profit", 1.0)), step=0.5)
+
     st.session_state["max_loss"] = max_loss_if_lose
     st.session_state["min_profit"] = min_profit_if_win
 
@@ -1109,13 +1061,7 @@ Il calcolo della bancata è uguale per Over e Under: stai facendo <i>BACK</i> e 
         st.dataframe(plan, use_container_width=True)
 
         st.markdown("## 🚪 Uscita adesso (se sei già LIVE)")
-        live_odds = st.number_input(
-            "Quota LIVE attuale (LAY odds)",
-            min_value=1.01,
-            value=float(st.session_state.get("live_odds", back_odds)),
-            step=0.01,
-            format="%.2f",
-        )
+        live_odds = st.number_input("Quota LIVE attuale (LAY odds)", min_value=1.01, value=float(st.session_state.get("live_odds", back_odds)), step=0.01, format="%.2f")
         st.session_state["live_odds"] = live_odds
 
         comm = comm_pct / 100.0
@@ -1144,3 +1090,4 @@ Il calcolo della bancata è uguale per Over e Under: stai facendo <i>BACK</i> e 
             )
     else:
         st.info("Imposta i valori e premi **CALCOLA**.")
+```0
