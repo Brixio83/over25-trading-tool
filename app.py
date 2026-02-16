@@ -1090,4 +1090,3 @@ Il calcolo della bancata è uguale per Over e Under: stai facendo <i>BACK</i> e 
             )
     else:
         st.info("Imposta i valori e premi **CALCOLA**.")
-```0
