@@ -1,19 +1,20 @@
 # app.py
 # Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)
-# ✅ FIX: ricerca fixture "intelligente" (range ampio + next/last fallback) per evitare "tutto 0".
-# ✅ Usa API-FOOTBALL (api-sports) + (opzionale) The Odds API per quote (se vuoi).
-# ✅ NEW: Modalità Aggressiva (Corner) con 3 livelli: Prudente / Medio / Aggressivo (separata dal resto)
+# ✅ Modalità 1: "Partite del giorno" (max 10) + click per analisi
+# ✅ Modalità 2: Inserimento manuale partita (come prima)
+# ✅ Trading / Stop manuale (come prima)
+# ✅ AGGIUNTO: Champions League + Europa League (e Conference League opzionale)
+# ✅ NUOVO: Corner (3 livelli) - prudente / medio / aggressivo (se dati disponibili)
 #
 # --- STREAMLIT SECRETS (Settings → Secrets su Streamlit Cloud) ---
-# THE_ODDS_API_KEY = "la_tua_key_odds_api"          # opzionale
-# API_FOOTBALL_KEY = "la_tua_key_api_football"      # obbligatoria per Analisi PRO
+# API_FOOTBALL_KEY = "la_tua_key_api_football"      # obbligatoria
+# THE_ODDS_API_KEY = "la_tua_key_odds_api"          # opzionale (non usata qui)
 #
 # NOTE: Non mettere le API key nel codice/GitHub.
 
 from __future__ import annotations
 
 import re
-import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,17 +27,20 @@ import streamlit as st
 # =============================
 
 API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
-THE_ODDS_BASE = "https://api.the-odds-api.com/v4"
 
-DEFAULT_LEAGUES = {
+DEFAULT_LEAGUES: Dict[str, int] = {
     "Serie A (ITA)": 135,
     "Serie B (ITA)": 136,
     "Premier League (ENG)": 39,
     "LaLiga (ESP)": 140,
     "Bundesliga (GER)": 78,
     "Ligue 1 (FRA)": 61,
+    "Eredivisie (NED)": 88,
+    "Primeira Liga (POR)": 94,
+    # ✅ Coppe Europee
     "Champions League": 2,
     "Europa League": 3,
+    "Conference League": 848,  # opzionale ma utile
 }
 
 # =============================
@@ -46,21 +50,15 @@ DEFAULT_LEAGUES = {
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def season_for_date(dt: datetime) -> int:
-    # Calcio: stagione "anno inizio" tipicamente da luglio.
-    # Esempio: Feb 2026 -> season 2025
+    # Stagione = anno di inizio (es. Feb 2026 -> 2025)
     return dt.year if dt.month >= 7 else dt.year - 1
 
-def safe_float(x: Any) -> Optional[float]:
-    try:
-        if x is None:
-            return None
-        return float(x)
-    except Exception:
-        return None
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
+
 
 def norm_team_name(s: str) -> str:
     s = s.strip().lower()
@@ -68,11 +66,11 @@ def norm_team_name(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 def parse_match_input(text: str) -> Optional[Tuple[str, str]]:
     if not text or not text.strip():
         return None
     t = text.strip()
-    # accetta: "Juve-Atalanta", "Juve - Atalanta", "Juve vs Atalanta"
     t = re.sub(r"\s+vs\s+", " - ", t, flags=re.IGNORECASE)
     if "-" in t:
         parts = [p.strip() for p in t.split("-") if p.strip()]
@@ -80,8 +78,10 @@ def parse_match_input(text: str) -> Optional[Tuple[str, str]]:
             return parts[0], parts[1]
     return None
 
+
 def api_football_headers(api_key: str) -> Dict[str, str]:
     return {"x-apisports-key": api_key}
+
 
 def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], timeout: int = 25) -> Dict[str, Any]:
     r = requests.get(url, headers=headers, params=params, timeout=timeout)
@@ -93,25 +93,9 @@ def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], tim
     data["_url"] = r.url
     return data
 
-def _mean(xs: List[float]) -> float:
-    return sum(xs) / max(1, len(xs))
-
-def _std(xs: List[float]) -> float:
-    if len(xs) <= 1:
-        return 0.0
-    m = _mean(xs)
-    return math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
-
-def _nearest_corner_line(x: float) -> float:
-    # linee tipiche: 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5
-    # arrotonda alla .5 più vicina, poi clamp
-    v = round(x * 2.0) / 2.0
-    if v.is_integer():
-        v += 0.5
-    return float(clamp(v, 6.5, 12.5))
 
 # =============================
-# API-FOOTBALL (API-SPORTS)
+# API-FOOTBALL (API-Sports)
 # =============================
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
@@ -120,17 +104,20 @@ def search_team(api_key: str, query: str) -> List[Dict[str, Any]]:
     data = http_get_json(url, api_football_headers(api_key), {"search": query})
     return data.get("response", []) or []
 
+
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_team_last_fixtures(api_key: str, team_id: int, season: int, last: int = 10) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/fixtures"
     data = http_get_json(url, api_football_headers(api_key), {"team": team_id, "season": season, "last": last})
     return data.get("response", []) or []
 
+
 @st.cache_data(ttl=60 * 30, show_spinner=False)
-def get_team_next_fixtures(api_key: str, team_id: int, season: int, nxt: int = 20) -> List[Dict[str, Any]]:
+def get_team_next_fixtures(api_key: str, team_id: int, season: int, nxt: int = 25) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/fixtures"
     data = http_get_json(url, api_football_headers(api_key), {"team": team_id, "season": season, "next": nxt})
     return data.get("response", []) or []
+
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_fixtures_in_range(
@@ -155,6 +142,7 @@ def get_fixtures_in_range(
     resp = data.get("response", []) or []
     return resp[:limit]
 
+
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[int]) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/injuries"
@@ -164,12 +152,19 @@ def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[in
     data = http_get_json(url, api_football_headers(api_key), params)
     return data.get("response", []) or []
 
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def get_fixture_statistics(api_key: str, fixture_id: int) -> List[Dict[str, Any]]:
-    # /fixtures/statistics?fixture=XXXX
-    url = f"{API_FOOTBALL_BASE}/fixtures/statistics"
-    data = http_get_json(url, api_football_headers(api_key), {"fixture": fixture_id})
+
+@st.cache_data(ttl=60 * 10, show_spinner=False)
+def get_fixtures_by_date_and_league(api_key: str, day: str, league_id: int) -> List[Dict[str, Any]]:
+    """
+    day: 'YYYY-MM-DD'
+    ✅ Per Champions/Europa: la season è comunque "anno inizio" (es. 2025 per 2025/26)
+    """
+    season = season_for_date(now_utc())
+    url = f"{API_FOOTBALL_BASE}/fixtures"
+    params = {"date": day, "league": league_id, "season": season}
+    data = http_get_json(url, api_football_headers(api_key), params)
     return data.get("response", []) or []
+
 
 def fixture_match_teams(fx: Dict[str, Any], a_id: int, b_id: int) -> bool:
     teams = fx.get("teams", {}) or {}
@@ -177,14 +172,67 @@ def fixture_match_teams(fx: Dict[str, Any], a_id: int, b_id: int) -> bool:
     away = (teams.get("away", {}) or {}).get("id")
     return (home == a_id and away == b_id) or (home == b_id and away == a_id)
 
+
+@dataclass
+class FixturePick:
+    fixture: Optional[Dict[str, Any]]
+    message: str
+    season: int
+
+
+def find_fixture_smart(
+    api_key: str,
+    team_a_id: int,
+    team_b_id: int,
+    league_id: Optional[int],
+) -> FixturePick:
+    dt = now_utc()
+    season = season_for_date(dt)
+
+    from_dt = dt - timedelta(days=30)
+    to_dt = dt + timedelta(days=90)
+
+    fx_range = get_fixtures_in_range(api_key, team_a_id, from_dt, to_dt, season, league_id=league_id)
+    for fx in fx_range:
+        if fixture_match_teams(fx, team_a_id, team_b_id):
+            return FixturePick(fixture=fx, message="Fixture trovata nel range (-30/+90 giorni).", season=season)
+
+    fx_next_a = get_team_next_fixtures(api_key, team_a_id, season, nxt=25)
+    for fx in fx_next_a:
+        if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
+            continue
+        if fixture_match_teams(fx, team_a_id, team_b_id):
+            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT del Team A.", season=season)
+
+    fx_next_b = get_team_next_fixtures(api_key, team_b_id, season, nxt=25)
+    for fx in fx_next_b:
+        if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
+            continue
+        if fixture_match_teams(fx, team_a_id, team_b_id):
+            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT del Team B.", season=season)
+
+    return FixturePick(
+        fixture=None,
+        message="Fixture non trovata (range + next). Analisi basata su ultimi match squadra (fallback).",
+        season=season,
+    )
+
+# =============================
+# ✅ NUOVO: CORNER (STATISTICHE)
+# =============================
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def get_fixture_statistics(api_key: str, fixture_id: int) -> List[Dict[str, Any]]:
+    url = f"{API_FOOTBALL_BASE}/fixtures/statistics"
+    data = http_get_json(url, api_football_headers(api_key), {"fixture": fixture_id})
+    return data.get("response", []) or []
+
+
 def _extract_corner_kicks(stats_for_team: Dict[str, Any]) -> Optional[int]:
-    """
-    stats_for_team:
-      { "team": {...}, "statistics": [ {"type":"Corner Kicks","value": X}, ... ] }
-    """
     arr = stats_for_team.get("statistics", []) or []
     for item in arr:
-        if (item.get("type") or "").strip().lower() in ["corner kicks", "corners", "corner kick"]:
+        t = (item.get("type") or "").strip().lower()
+        if t in ["corner kicks", "corners", "corner kick"]:
             v = item.get("value")
             if v is None:
                 return None
@@ -197,34 +245,43 @@ def _extract_corner_kicks(stats_for_team: Dict[str, Any]) -> Optional[int]:
                     return None
     return None
 
+
+def _mean(xs: List[float]) -> float:
+    return sum(xs) / max(1, len(xs))
+
+
+def _std(xs: List[float]) -> float:
+    if len(xs) <= 1:
+        return 0.0
+    m = _mean(xs)
+    return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
+
+
+def _nearest_corner_line(x: float) -> float:
+    # linee tipiche: 6.5..12.5
+    v = round(x * 2.0) / 2.0
+    if float(v).is_integer():
+        v += 0.5
+    return float(max(6.5, min(12.5, v)))
+
+
 @st.cache_data(ttl=60 * 30, show_spinner=False)
-def compute_team_corner_profile(
-    api_key: str,
-    team_id: int,
-    season: int,
-    last_n: int = 10,
-) -> Dict[str, Any]:
-    """
-    Usa le ultime N fixture giocate (last fixtures) e per ciascuna prende /fixtures/statistics
-    per ottenere Corner Kicks del team e dell'avversario.
-    """
+def compute_team_corner_profile(api_key: str, team_id: int, season: int, last_n: int = 10) -> Dict[str, Any]:
     last_fx = get_team_last_fixtures(api_key, team_id, season, last=last_n)
+
     corners_for: List[float] = []
     corners_against: List[float] = []
     corners_total: List[float] = []
-    used_fixtures: int = 0
 
     for fx in last_fx:
         fixture_id = (fx.get("fixture", {}) or {}).get("id")
         if not fixture_id:
             continue
 
-        # stats per fixture
         resp = get_fixture_statistics(api_key, int(fixture_id))
         if not resp or len(resp) < 2:
             continue
 
-        # trova record del team e dell'avversario
         team_rec = None
         opp_rec = None
         for r in resp:
@@ -245,9 +302,8 @@ def compute_team_corner_profile(
         corners_for.append(float(cf))
         corners_against.append(float(ca))
         corners_total.append(float(cf + ca))
-        used_fixtures += 1
 
-    if used_fixtures == 0:
+    if len(corners_total) == 0:
         return {
             "matches_used": 0,
             "for_avg": 0.0,
@@ -256,46 +312,31 @@ def compute_team_corner_profile(
             "total_std": 0.0,
             "last5_total_avg": 0.0,
             "trend": 0.0,
-            "raw_totals": [],
         }
 
     total_avg = _mean(corners_total)
     total_std = _std(corners_total)
     last5 = corners_total[-5:] if len(corners_total) >= 5 else corners_total
     last5_avg = _mean(last5)
-    trend = last5_avg - total_avg  # positivo = ultimi 5 più alti della media
+    trend = last5_avg - total_avg
 
     return {
-        "matches_used": used_fixtures,
+        "matches_used": len(corners_total),
         "for_avg": _mean(corners_for),
         "against_avg": _mean(corners_against),
         "total_avg": total_avg,
         "total_std": total_std,
         "last5_total_avg": last5_avg,
         "trend": trend,
-        "raw_totals": corners_total,
     }
 
-def build_corner_recos(
-    a_c: Dict[str, Any],
-    b_c: Dict[str, Any],
-    a_name: str,
-    b_name: str,
-) -> Dict[str, Any]:
-    """
-    Costruisce 3 livelli di linee corner + eventuale nota NO BET.
-    Basato su:
-      - media corner totali attesa (media delle due squadre)
-      - varianza (std)
-      - trend ultimi 5 vs ultimi 10
-    """
-    # Se pochi dati, niente aggressivo
+
+def build_corner_recos(a_c: Dict[str, Any], b_c: Dict[str, Any], a_name: str, b_name: str) -> Dict[str, Any]:
     min_used = min(a_c.get("matches_used", 0), b_c.get("matches_used", 0))
     total_avg_expected = (a_c.get("total_avg", 0.0) + b_c.get("total_avg", 0.0)) / 2.0
     total_std_expected = (a_c.get("total_std", 0.0) + b_c.get("total_std", 0.0)) / 2.0
     trend_expected = (a_c.get("trend", 0.0) + b_c.get("trend", 0.0)) / 2.0
 
-    # Regole NO BET (semplici ma efficaci)
     reasons = []
     if min_used < 6:
         reasons.append("pochi dati corner (meno di 6 match con statistiche)")
@@ -303,23 +344,13 @@ def build_corner_recos(
         reasons.append("media corner totale bassa")
     if total_std_expected > 3.2:
         reasons.append("corner molto variabili (rischio alto)")
-    if abs(trend_expected) < 0.2:
-        # non è un blocco totale, ma segnala che non c'è spinta trend
-        pass
 
-    no_bet = False
-    if len(reasons) >= 2:
-        no_bet = True
+    no_bet = len(reasons) >= 2
 
-    # linee (3 livelli)
-    # Prudente: leggermente sotto la media
     line_prud = _nearest_corner_line(total_avg_expected - 0.7)
-    # Medio: intorno alla media
     line_med = _nearest_corner_line(total_avg_expected)
-    # Aggressivo: sopra media
     line_aggr = _nearest_corner_line(total_avg_expected + 1.0)
 
-    # team corners (spunto extra)
     a_for = a_c.get("for_avg", 0.0)
     b_for = b_c.get("for_avg", 0.0)
     team_pick = None
@@ -340,127 +371,18 @@ def build_corner_recos(
         "team_pick": team_pick,
     }
 
-def build_aggressive_combo_suggestions(
-    a_sum: Dict[str, Any],
-    b_sum: Dict[str, Any],
-    a_name: str,
-    b_name: str,
-    corners_reco: Dict[str, Any],
-) -> List[str]:
-    """
-    Piccole combo 'spinte' ma con logica.
-    Non sono certezze.
-    """
-    out: List[str] = []
-    if corners_reco.get("no_bet"):
-        return out
-
-    avg_goals = (a_sum["avg_total_goals"] + b_sum["avg_total_goals"]) / 2.0
-    ppg_diff = a_sum["ppg"] - b_sum["ppg"]
-
-    # Base: corners medio come ancora
-    anchor = corners_reco.get("medio", "Over 9.5 Corner")
-
-    if avg_goals >= 2.6:
-        out.append(f"Combo (spinta): {anchor} + Over 1.5 Gol")
-    elif avg_goals <= 2.1:
-        out.append(f"Combo (spinta): {anchor} + Under 3.5 Gol")
-    else:
-        out.append(f"Combo (spinta): {anchor} + Goal/NoGoal da valutare LIVE")
-
-    # Direzione esito se differenza punti netta
-    if abs(ppg_diff) >= 0.8:
-        if ppg_diff > 0:
-            out.append(f"Combo (spinta): {anchor} + 1X ( {a_name} non perde )")
-        else:
-            out.append(f"Combo (spinta): {anchor} + X2 ( {b_name} non perde )")
-
-    # Team corners se forte
-    if corners_reco.get("team_pick"):
-        out.append(f"Alternativa Team Corner: {corners_reco['team_pick']}")
-
-    return out
-
-@dataclass
-class FixturePick:
-    fixture: Optional[Dict[str, Any]]
-    message: str
-    season: int
-
-def find_fixture_smart(
-    api_key: str,
-    team_a_id: int,
-    team_b_id: int,
-    league_id: Optional[int],
-) -> FixturePick:
-    """
-    Strategia:
-      1) Range ampio: -30 giorni / +90 giorni (stessa season)
-      2) Next fixtures (25) del team A e cerca team B
-      3) Next fixtures (25) del team B e cerca team A
-      4) Se ancora niente: ritorna None e fai analisi su last fixtures (fallback sensato)
-    """
-    dt = now_utc()
-    season = season_for_date(dt)
-
-    from_dt = dt - timedelta(days=30)
-    to_dt = dt + timedelta(days=90)
-
-    # 1) Range ampio su team A
-    fx_range = get_fixtures_in_range(api_key, team_a_id, from_dt, to_dt, season, league_id=league_id)
-    for fx in fx_range:
-        if fixture_match_teams(fx, team_a_id, team_b_id):
-            return FixturePick(fixture=fx, message="Fixture trovata nel range (-30/+90 giorni).", season=season)
-
-    # 2) Next su A
-    fx_next_a = get_team_next_fixtures(api_key, team_a_id, season, nxt=25)
-    for fx in fx_next_a:
-        if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
-            continue
-        if fixture_match_teams(fx, team_a_id, team_b_id):
-            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT del Team A.", season=season)
-
-    # 3) Next su B
-    fx_next_b = get_team_next_fixtures(api_key, team_b_id, season, nxt=25)
-    for fx in fx_next_b:
-        if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
-            continue
-        if fixture_match_teams(fx, team_a_id, team_b_id):
-            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT del Team B.", season=season)
-
-    return FixturePick(
-        fixture=None,
-        message="Fixture non trovata (range + next). Analisi basata su ultimi match squadra (fallback).",
-        season=season,
-    )
 
 # =============================
-# ANALISI (semplice, trasparente)
+# ANALISI / FORMA
 # =============================
 
 def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[str, Any]:
-    """
-    Calcola:
-      - punti tot e PPG
-      - gol fatti/subiti
-      - media gol totali partita
-      - stringa forma (W/D/L)
-    """
-    if not last_fixtures:
-        return {
-            "matches": 0,
-            "points": 0,
-            "ppg": 0.0,
-            "gf": 0,
-            "ga": 0,
-            "avg_total_goals": 0.0,
-            "form": "",
-        }
-
     pts = 0
     gf = 0
     ga = 0
-    form = []
+    form: List[str] = []
+    totals: List[int] = []
+    btts: List[bool] = []
 
     for fx in last_fixtures:
         teams = fx.get("teams", {}) or {}
@@ -470,28 +392,32 @@ def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[st
         gh = goals.get("home")
         ga_ = goals.get("away")
 
-        # se fixture non giocata, skip
         if gh is None or ga_ is None:
             continue
 
+        gh_i = int(gh)
+        ga_i = int(ga_)
+        totals.append(gh_i + ga_i)
+        btts.append(gh_i > 0 and ga_i > 0)
+
         if home == team_id:
-            gf += int(gh)
-            ga += int(ga_)
-            if gh > ga_:
+            gf += gh_i
+            ga += ga_i
+            if gh_i > ga_i:
                 pts += 3
                 form.append("W")
-            elif gh == ga_:
+            elif gh_i == ga_i:
                 pts += 1
                 form.append("D")
             else:
                 form.append("L")
         elif away == team_id:
-            gf += int(ga_)
-            ga += int(gh)
-            if ga_ > gh:
+            gf += ga_i
+            ga += gh_i
+            if ga_i > gh_i:
                 pts += 3
                 form.append("W")
-            elif ga_ == gh:
+            elif ga_i == gh_i:
                 pts += 1
                 form.append("D")
             else:
@@ -499,15 +425,7 @@ def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[st
 
     played = len(form)
     if played == 0:
-        return {
-            "matches": 0,
-            "points": 0,
-            "ppg": 0.0,
-            "gf": 0,
-            "ga": 0,
-            "avg_total_goals": 0.0,
-            "form": "",
-        }
+        return {"matches": 0, "points": 0, "ppg": 0.0, "gf": 0, "ga": 0, "avg_total_goals": 0.0, "form": "", "totals": [], "btts": []}
 
     avg_total_goals = (gf + ga) / played
     return {
@@ -518,31 +436,180 @@ def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[st
         "ga": ga,
         "avg_total_goals": avg_total_goals,
         "form": "".join(form[-5:]),
+        "totals": totals[-played:],
+        "btts": btts[-played:],
     }
 
-def suggest_markets(a: Dict[str, Any], b: Dict[str, Any]) -> List[str]:
-    """
-    Suggerimenti "trasparenti" e NON predittivi:
-    Usa solo heuristiche basate su media gol e ppg.
-    """
-    sug = []
-    avg_goals = (a["avg_total_goals"] + b["avg_total_goals"]) / 2.0
-    ppg_diff = abs(a["ppg"] - b["ppg"])
 
-    if avg_goals >= 3.0:
-        sug.append("Tendenza gol alta → valuta Over 2.5 / Over 3.5 (con prudenza).")
-    elif avg_goals <= 2.1:
-        sug.append("Tendenza gol bassa → valuta Under 2.5 / Under 3.5 (con prudenza).")
+def market_rates_from_summary(s: Dict[str, Any]) -> Dict[str, float]:
+    totals = s.get("totals", []) or []
+    btts = s.get("btts", []) or []
+    n = len(totals)
+    if n == 0:
+        return {"o15": 0.0, "o25": 0.0, "o35": 0.0, "u35": 0.0, "u45": 0.0, "btts_yes": 0.0}
+    o15 = sum(1 for t in totals if t >= 2) / n
+    o25 = sum(1 for t in totals if t >= 3) / n
+    o35 = sum(1 for t in totals if t >= 4) / n
+    u35 = sum(1 for t in totals if t <= 3) / n
+    u45 = sum(1 for t in totals if t <= 4) / n
+    btts_yes = sum(1 for x in btts if x) / n
+    return {"o15": o15, "o25": o25, "o35": o35, "u35": u35, "u45": u45, "btts_yes": btts_yes}
+
+
+def combine_rates(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
+    keys = set(a.keys()) | set(b.keys())
+    return {k: (a.get(k, 0.0) + b.get(k, 0.0)) / 2.0 for k in keys}
+
+
+def label_risk(market: str) -> str:
+    safe = {"Over 1.5", "Under 4.5", "Under 3.5", "1X", "X2", "12"}
+    medium = {"Over 2.5", "Goal (BTTS Sì)", "No Goal (BTTS No)"}
+    agg = {"Over 3.5"}
+    if market in safe:
+        return "🟩 Prudente"
+    if market in medium:
+        return "🟨 Medio"
+    if market in agg:
+        return "🟥 Aggressivo"
+    return "🟦 Neutro"
+
+
+def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> Dict[str, Any]:
+    h_rates = market_rates_from_summary(home_sum)
+    a_rates = market_rates_from_summary(away_sum)
+    r = combine_rates(h_rates, a_rates)
+    avg_goals = (home_sum.get("avg_total_goals", 0.0) + away_sum.get("avg_total_goals", 0.0)) / 2.0
+
+    if r["o25"] >= 0.62 and avg_goals >= 2.7:
+        primary = ("Over 2.5", f"Trend gol alto: Over 2.5 medio ≈ {r['o25']*100:.0f}% (ultimi match). Media gol ≈ {avg_goals:.2f}.")
+        alt = [
+            ("Under 4.5", f"Linea prudente: Under 4.5 ≈ {r['u45']*100:.0f}%."),
+            ("Over 3.5", f"Più aggressivo: Over 3.5 ≈ {r['o35']*100:.0f}%."),
+        ]
+    elif r["u35"] >= 0.70 and avg_goals <= 2.4:
+        primary = ("Under 3.5", f"Trend gol basso: Under 3.5 medio ≈ {r['u35']*100:.0f}%. Media gol ≈ {avg_goals:.2f}.")
+        alt = [
+            ("Over 1.5", f"Alternativa prudente: Over 1.5 ≈ {r['o15']*100:.0f}%."),
+            ("Under 4.5", f"Ancora più coperto: Under 4.5 ≈ {r['u45']*100:.0f}%."),
+        ]
     else:
-        sug.append("Gol medi → mercato goal/over dipende dal live (non c'è edge automatico).")
+        primary = ("Over 1.5", f"Zona centrale: Over 1.5 ≈ {r['o15']*100:.0f}%. Media gol ≈ {avg_goals:.2f}.")
+        alt = [
+            ("Over 2.5", f"Se vuoi più quota: Over 2.5 ≈ {r['o25']*100:.0f}%."),
+            ("Under 4.5", f"Se vuoi più copertura: Under 4.5 ≈ {r['u45']*100:.0f}%."),
+        ]
 
-    if ppg_diff >= 1.0:
-        sug.append("Differenza forma/punti alta → 1X2 o Doppia Chance può essere più coerente.")
+    btts_yes = r["btts_yes"]
+    if btts_yes >= 0.62:
+        alt.append(("Goal (BTTS Sì)", f"BTTS Sì alto: ≈ {btts_yes*100:.0f}%."))
+    elif btts_yes <= 0.40:
+        alt.append(("No Goal (BTTS No)", f"BTTS basso: BTTS Sì ≈ {btts_yes*100:.0f}% → più coerente No Goal."))
     else:
-        sug.append("Squadre vicine → attenzione al 1X2; spesso value è su linee gol/live.")
+        alt.append(("Goal/NoGoal", f"BTTS medio ≈ {btts_yes*100:.0f}% → decide meglio col LIVE."))
 
-    sug.append("Ricorda: è solo lettura dati recenti, NON una previsione.")
-    return sug
+    ppg_h = home_sum.get("ppg", 0.0)
+    ppg_a = away_sum.get("ppg", 0.0)
+    diff = ppg_h - ppg_a
+
+    if diff >= 0.55:
+        outcome = ("1X", f"Casa più in forma nei recenti: PPG {ppg_h:.2f} vs {ppg_a:.2f}.")
+    elif diff <= -0.55:
+        outcome = ("X2", f"Trasferta più in forma nei recenti: PPG {ppg_a:.2f} vs {ppg_h:.2f}.")
+    else:
+        outcome = ("12", f"PPG simili ({ppg_h:.2f} vs {ppg_a:.2f}): match “aperto” (no pareggio).")
+
+    primary_market, primary_why = primary
+    primary_obj = {"market": primary_market, "why": primary_why, "risk": label_risk(primary_market)}
+
+    alternatives: List[Dict[str, Any]] = []
+    seen = {primary_market}
+    for m, why in alt:
+        if m in seen:
+            continue
+        seen.add(m)
+        alternatives.append({"market": m, "why": why, "risk": label_risk(m)})
+
+    return {
+        "primary": primary_obj,
+        "alternatives": alternatives[:4],
+        "outcome": {"market": outcome[0], "why": outcome[1], "risk": label_risk(outcome[0])},
+        "meta": {"avg_goals": avg_goals, "rates": r},
+    }
+
+
+# =============================
+# "TOP 10 DEL GIORNO"
+# =============================
+
+def clarity_score(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> float:
+    hr = market_rates_from_summary(home_sum)
+    ar = market_rates_from_summary(away_sum)
+    r = combine_rates(hr, ar)
+
+    avg_goals = (home_sum.get("avg_total_goals", 0.0) + away_sum.get("avg_total_goals", 0.0)) / 2.0
+    ppg_diff = abs(home_sum.get("ppg", 0.0) - away_sum.get("ppg", 0.0))
+    btts = r.get("btts_yes", 0.0)
+
+    gol_extreme = abs(avg_goals - 2.5)
+    btts_extreme = abs(btts - 0.5) * 1.2
+    ppg_component = clamp(ppg_diff, 0.0, 1.5) * 0.7
+
+    return gol_extreme + btts_extreme + ppg_component
+
+
+def fixture_label(fx: Dict[str, Any]) -> str:
+    teams = fx.get("teams", {}) or {}
+    league = fx.get("league", {}) or {}
+    home = (teams.get("home", {}) or {}).get("name", "Home")
+    away = (teams.get("away", {}) or {}).get("name", "Away")
+    l_name = league.get("name", "League")
+
+    dt = (fx.get("fixture", {}) or {}).get("date", "")
+    hhmm = ""
+    if dt:
+        try:
+            ddt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+            hhmm = ddt.astimezone().strftime("%H:%M")
+        except Exception:
+            hhmm = ""
+    return f"{hhmm}  {home} - {away}  •  {l_name}"
+
+
+def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Optional[int], home_name: str, away_name: str) -> Dict[str, Any]:
+    pick = find_fixture_smart(api_key, home_id, away_id, league_id)
+    season = pick.season
+
+    home_last = get_team_last_fixtures(api_key, home_id, season, last=10)
+    away_last = get_team_last_fixtures(api_key, away_id, season, last=10)
+
+    home_sum = summarize_form(home_last, home_id)
+    away_sum = summarize_form(away_last, away_id)
+
+    inj_home = get_injuries(api_key, home_id, season, league_id if league_id else None)
+    inj_away = get_injuries(api_key, away_id, season, league_id if league_id else None)
+
+    rec = recommend_for_match(home_sum, away_sum)
+
+    # ✅ NUOVO: CORNER PROFILE + RECO (non blocca nulla se non ci sono dati)
+    a_corner = compute_team_corner_profile(api_key, int(home_id), season, last_n=10)
+    b_corner = compute_team_corner_profile(api_key, int(away_id), season, last_n=10)
+    corner_reco = build_corner_recos(a_corner, b_corner, home_name, away_name)
+
+    return {
+        "pick": pick,
+        "home_sum": home_sum,
+        "away_sum": away_sum,
+        "inj_home": inj_home,
+        "inj_away": inj_away,
+        "rec": rec,
+        "home_name": home_name,
+        "away_name": away_name,
+        "league_id": league_id,
+        "corner_a": a_corner,
+        "corner_b": b_corner,
+        "corner_reco": corner_reco,
+    }
+
 
 # =============================
 # TRADING / STOP (manuale)
@@ -551,11 +618,13 @@ def suggest_markets(a: Dict[str, Any], b: Dict[str, Any]) -> List[str]:
 def lay_liability(lay_stake: float, lay_odds: float) -> float:
     return lay_stake * (lay_odds - 1.0)
 
+
 def pnl_if_win(back_stake: float, back_odds: float, lay_stake_: float, lay_odds_: float, comm: float) -> float:
     gross = back_stake * (back_odds - 1.0) - lay_liability(lay_stake_, lay_odds_)
     if gross > 0:
         gross = gross * (1.0 - comm)
     return gross
+
 
 def pnl_if_lose(back_stake: float, lay_stake_: float, comm: float) -> float:
     gross = -back_stake + lay_stake_
@@ -563,8 +632,10 @@ def pnl_if_lose(back_stake: float, lay_stake_: float, comm: float) -> float:
         gross = gross * (1.0 - comm)
     return gross
 
+
 def lay_stake_for_target_loss_when_lose(back_stake: float, target_loss: float) -> float:
     return max(0.0, back_stake - target_loss)
+
 
 def lay_odds_needed_for_min_profit_if_win(
     back_stake: float,
@@ -581,6 +652,7 @@ def lay_odds_needed_for_min_profit_if_win(
     if max_lay_odds <= 1.01:
         return None
     return max_lay_odds
+
 
 def make_stop_plan(
     back_stake: float,
@@ -656,6 +728,7 @@ def make_stop_plan(
 
     return plan
 
+
 # =============================
 # UI
 # =============================
@@ -673,15 +746,16 @@ h1, h2, h3 { letter-spacing: -0.02em; }
   background: rgba(255,255,255,0.03);
   border-radius: 16px;
   padding: 16px;
+  margin-bottom: 12px;
 }
-.pill {
+.badge {
   display: inline-block;
-  padding: 6px 10px;
+  padding: 4px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(255,255,255,0.04);
-  margin-right: 8px;
-  margin-bottom: 8px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.05);
+  font-size: 0.85rem;
+  margin-left: 8px;
 }
 </style>
 """,
@@ -689,19 +763,21 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 )
 
 st.title("⚽ Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)")
-st.caption("Analisi basata su dati recenti e disponibilità API. Non è una previsione certa.")
+st.caption("Analisi basata su dati recenti. Non è una previsione certa.")
 
 secrets_keys = dict(st.secrets) if hasattr(st, "secrets") else {}
 api_football_key = secrets_keys.get("API_FOOTBALL_KEY", "")
-the_odds_key = secrets_keys.get("THE_ODDS_API_KEY", "")
 
 with st.expander("🔧 DEBUG (solo se serve)", expanded=False):
-    st.write("keys nei secrets →")
     st.json({k: ("***" if "KEY" in k else v) for k, v in secrets_keys.items()})
     if api_football_key:
-        st.write(f"DEBUG: API_FOOTBALL_KEY presente (lunghezza {len(api_football_key)}).")
+        st.write(f"API_FOOTBALL_KEY presente (lunghezza {len(api_football_key)}).")
     else:
-        st.warning("API_FOOTBALL_KEY NON trovata nei Secrets. Analisi PRO non funzionerà.")
+        st.warning("API_FOOTBALL_KEY NON trovata nei Secrets.")
+
+if not api_football_key:
+    st.error("Manca API_FOOTBALL_KEY nei Secrets (Streamlit → Settings → Secrets).")
+    st.stop()
 
 tabs = st.tabs(["📊 Analisi partita (PRO)", "🧮 Trading / Stop (Manuale)"])
 
@@ -711,201 +787,460 @@ tabs = st.tabs(["📊 Analisi partita (PRO)", "🧮 Trading / Stop (Manuale)"])
 with tabs[0]:
     st.subheader("📊 Analisi partita (PRO)")
 
-    colA, colB = st.columns([2, 1], gap="large")
-    with colA:
-        match_text = st.text_input("Partita", value=st.session_state.get("match_text", ""), placeholder="Es: AC Milan - Como")
-    with colB:
-        league_label = st.selectbox("Campionato (consigliato)", options=["Auto"] + list(DEFAULT_LEAGUES.keys()), index=0)
-        league_id = None if league_label == "Auto" else DEFAULT_LEAGUES[league_label]
+    mode_tabs = st.tabs(["🗓️ Partite del giorno (max 10)", "✍️ Inserisci partita manualmente"])
 
-    st.session_state["match_text"] = match_text
-    btn = st.button("🔎 Analizza", type="primary", use_container_width=True)
+    # ====== MODE 1: Partite del giorno ======
+    with mode_tabs[0]:
+        st.markdown("### 🗓️ Partite del giorno")
+        st.caption("Include anche Champions League ed Europa League (se ci sono match quel giorno).")
 
-    if btn:
-        if not api_football_key:
-            st.error("Manca API_FOOTBALL_KEY nei Secrets di Streamlit. Vai su Settings → Secrets e aggiungila.")
-            st.stop()
-
-        parsed = parse_match_input(match_text)
-        if not parsed:
-            st.error("Scrivi la partita in formato tipo: 'Juve - Atalanta' oppure 'Juve-Atalanta'.")
-            st.stop()
-
-        team_a_name, team_b_name = parsed
-
-        with st.spinner("Cerco squadre su API-FOOTBALL..."):
-            a_candidates = search_team(api_football_key, team_a_name)
-            b_candidates = search_team(api_football_key, team_b_name)
-
-        if not a_candidates:
-            st.error(f"Non trovo la squadra: {team_a_name}")
-            st.stop()
-        if not b_candidates:
-            st.error(f"Non trovo la squadra: {team_b_name}")
-            st.stop()
-
-        def pick_best(cands: List[Dict[str, Any]], q: str) -> Dict[str, Any]:
-            qn = norm_team_name(q)
-            best = cands[0]
-            best_score = -1
-            for c in cands:
-                name = (c.get("team", {}) or {}).get("name", "") or ""
-                nn = norm_team_name(name)
-                score = 0
-                if nn == qn:
-                    score += 100
-                if qn in nn:
-                    score += 40
-                score += max(0, 20 - abs(len(nn) - len(qn)))
-                if score > best_score:
-                    best_score = score
-                    best = c
-            return best
-
-        a_team = pick_best(a_candidates, team_a_name)
-        b_team = pick_best(b_candidates, team_b_name)
-
-        a_id = (a_team.get("team", {}) or {}).get("id")
-        b_id = (b_team.get("team", {}) or {}).get("id")
-        a_real = (a_team.get("team", {}) or {}).get("name", team_a_name)
-        b_real = (b_team.get("team", {}) or {}).get("name", team_b_name)
-
-        if not a_id or not b_id:
-            st.error("Errore: ID squadra non disponibile (risposta API inconsistente).")
-            st.stop()
-
-        with st.spinner("Cerco fixture (smart) e ultimi match per forma..."):
-            pick = find_fixture_smart(api_football_key, int(a_id), int(b_id), league_id)
-
-            a_last = get_team_last_fixtures(api_football_key, int(a_id), pick.season, last=10)
-            b_last = get_team_last_fixtures(api_football_key, int(b_id), pick.season, last=10)
-
-            a_sum = summarize_form(a_last, int(a_id))
-            b_sum = summarize_form(b_last, int(b_id))
-
-            inj_a = get_injuries(api_football_key, int(a_id), pick.season, league_id if league_id else None)
-            inj_b = get_injuries(api_football_key, int(b_id), pick.season, league_id if league_id else None)
-
-            # NEW: corner profile (separato)
-            a_corner = compute_team_corner_profile(api_football_key, int(a_id), pick.season, last_n=10)
-            b_corner = compute_team_corner_profile(api_football_key, int(b_id), pick.season, last_n=10)
-            corner_reco = build_corner_recos(a_corner, b_corner, a_real, b_real)
-            corner_combos = build_aggressive_combo_suggestions(a_sum, b_sum, a_real, b_real, corner_reco)
-
-        st.success("✅ Analisi pronta")
-
-        # Header match
-        fixture_note = pick.message
-        if pick.fixture:
-            fx = pick.fixture
-            fx_date = ((fx.get("fixture", {}) or {}).get("date")) or ""
-            league = fx.get("league", {}) or {}
-            st.markdown(
-                f"""
-<div class="card">
-<b>{a_real} vs {b_real}</b><br/>
-<span class="small-muted">Fixture trovata: {fx_date} | League: {league.get("name","?")} (ID {league.get("id","?")}) | Stagione: {pick.season}/{pick.season+1}</span><br/>
-<span class="small-muted">{fixture_note}</span>
-</div>
-""",
-                unsafe_allow_html=True,
+        cA, cB, cC = st.columns([2, 1, 1], gap="large")
+        with cA:
+            selected_leagues = st.multiselect(
+                "Campionati da includere",
+                options=list(DEFAULT_LEAGUES.keys()),
+                default=st.session_state.get(
+                    "selected_leagues",
+                    ["Premier League (ENG)", "Serie A (ITA)", "Bundesliga (GER)", "LaLiga (ESP)", "Ligue 1 (FRA)", "Champions League", "Europa League"],
+                ),
             )
+        with cB:
+            d_today = datetime.now().date()
+            day_pick = st.date_input("Giorno", value=st.session_state.get("day_pick", d_today))
+        with cC:
+            max_out = st.number_input("Max partite", min_value=3, max_value=20, value=int(st.session_state.get("max_out", 10)), step=1)
+
+        st.session_state["selected_leagues"] = selected_leagues
+        st.session_state["day_pick"] = day_pick
+        st.session_state["max_out"] = int(max_out)
+
+        if st.button("🔄 Trova partite", type="primary", use_container_width=True):
+            if not selected_leagues:
+                st.warning("Seleziona almeno un campionato.")
+            else:
+                with st.spinner("Carico le partite e preparo la short-list..."):
+                    day_str = day_pick.isoformat()
+                    season = season_for_date(now_utc())
+
+                    all_fx: List[Dict[str, Any]] = []
+                    for lname in selected_leagues:
+                        lid = DEFAULT_LEAGUES[lname]
+                        fx = get_fixtures_by_date_and_league(api_football_key, day_str, lid)
+                        for f in fx:
+                            status = (((f.get("fixture", {}) or {}).get("status", {}) or {}).get("short")) or ""
+                            if status in {"FT", "AET", "PEN", "CANC", "PST", "ABD"}:
+                                continue
+                            all_fx.append(f)
+
+                    all_fx = all_fx[:40]
+
+                    scored: List[Tuple[float, Dict[str, Any]]] = []
+                    for fx in all_fx:
+                        teams = fx.get("teams", {}) or {}
+                        home = teams.get("home", {}) or {}
+                        away = teams.get("away", {}) or {}
+                        home_id = home.get("id")
+                        away_id = away.get("id")
+                        if not home_id or not away_id:
+                            continue
+
+                        home_last = get_team_last_fixtures(api_football_key, int(home_id), season, last=10)
+                        away_last = get_team_last_fixtures(api_football_key, int(away_id), season, last=10)
+
+                        home_sum = summarize_form(home_last, int(home_id))
+                        away_sum = summarize_form(away_last, int(away_id))
+
+                        sc = clarity_score(home_sum, away_sum)
+                        scored.append((sc, fx))
+
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    top_fx = [fx for _, fx in scored[: int(max_out)]]
+
+                    st.session_state["day_candidates"] = top_fx
+                    st.session_state["day_choice_idx"] = 0
+                    st.session_state["last_analysis_result"] = None
+                    st.session_state["last_analysis_source"] = None
+
+        candidates = st.session_state.get("day_candidates", [])
+        if not candidates:
+            st.info("Seleziona campionati e premi **Trova partite**.")
         else:
-            st.markdown(
-                f"""
+            labels = [fixture_label(fx) for fx in candidates]
+            idx = int(st.session_state.get("day_choice_idx", 0))
+            idx = max(0, min(idx, len(labels) - 1))
+            choice = st.selectbox("Seleziona una partita", labels, index=idx)
+            st.session_state["day_choice_idx"] = labels.index(choice)
+
+            fx_sel = candidates[st.session_state["day_choice_idx"]]
+            t = fx_sel.get("teams", {}) or {}
+            l = fx_sel.get("league", {}) or {}
+            home = t.get("home", {}) or {}
+            away = t.get("away", {}) or {}
+
+            home_id = int(home.get("id", 0) or 0)
+            away_id = int(away.get("id", 0) or 0)
+            home_name = home.get("name", "Home")
+            away_name = away.get("name", "Away")
+            league_id = int(l.get("id", 0) or 0) or None
+
+            if st.button("🔎 Analizza questa partita", use_container_width=True):
+                st.session_state["match_text"] = f"{home_name} - {away_name}"
+                with st.spinner("Analizzo..."):
+                    result = analyze_by_team_ids(api_football_key, home_id, away_id, league_id, home_name, away_name)
+                st.session_state["last_analysis_result"] = result
+                st.session_state["last_analysis_source"] = "day"
+
+            res = st.session_state.get("last_analysis_result")
+            if res and st.session_state.get("last_analysis_source") == "day":
+                pick = res["pick"]
+                home_sum = res["home_sum"]
+                away_sum = res["away_sum"]
+                inj_home = res["inj_home"]
+                inj_away = res["inj_away"]
+                rec = res["rec"]
+                hn = res["home_name"]
+                an = res["away_name"]
+                corner_reco = res.get("corner_reco")
+
+                st.success("✅ Analisi pronta")
+
+                if pick.fixture:
+                    fx = pick.fixture
+                    fx_date = ((fx.get("fixture", {}) or {}).get("date")) or ""
+                    league = fx.get("league", {}) or {}
+                    st.markdown(
+                        f"""
 <div class="card">
-<b>{a_real} vs {b_real}</b><br/>
-<span class="small-muted">Stagione stimata: {pick.season}/{pick.season+1} | League: {league_label}</span><br/>
-<span class="small-muted">{fixture_note}</span>
+<b>{hn} vs {an}</b><br/>
+<span class="small-muted">Fixture: {fx_date} | League: {league.get("name","?")} (ID {league.get("id","?")}) | Stagione: {pick.season}/{pick.season+1}</span><br/>
+<span class="small-muted">{pick.message}</span>
 </div>
 """,
-                unsafe_allow_html=True,
-            )
-
-        c1, c2 = st.columns(2, gap="large")
-
-        def team_block(title: str, s: Dict[str, Any], inj_count: int):
-            stars = "★" * min(5, max(1, int(round(clamp(s["ppg"], 0.0, 3.0) / 0.6))))
-            st.markdown(f"### {title}")
-            st.write(f"- Forma (ultimi {s['matches']}): **{stars}**  ({s['form']})")
-            st.write(f"- Punti: **{s['points']}**  (PPG: **{s['ppg']:.2f}**)")
-            st.write(f"- Gol fatti/subiti: **{s['gf']} / {s['ga']}**")
-            st.write(f"- Media gol totali: **{s['avg_total_goals']:.2f}**")
-            st.write(f"- Infortunati/Squalificati (da API, se disponibili): **{inj_count}**")
-
-        with c1:
-            team_block(f"🏠 {a_real}", a_sum, len(inj_a))
-        with c2:
-            team_block(f"✈️ {b_real}", b_sum, len(inj_b))
-
-        st.markdown("---")
-        st.markdown("## 🧠 Suggerimenti (trasparenti, **NON certezze**)")
-        for s in suggest_markets(a_sum, b_sum):
-            st.write(f"- {s}")
-
-        # =============================
-        # NEW: MODALITÀ AGGRESSIVA (CORNER) - SEPARATA
-        # =============================
-        st.markdown("---")
-        st.markdown("## 🎯 Modalità Aggressiva (Corner) — **3 livelli**")
-        st.caption("Questa sezione è più “spinta”: stake più piccolo e più rischio. Basata su trend corner reali (ultimi match).")
-
-        if corner_reco.get("no_bet"):
-            rs = corner_reco.get("no_bet_reasons", [])
-            st.warning("⚠️ Meglio NON forzare i corner su questa partita (NO BET).")
-            if rs:
-                st.write("Motivi principali:")
-                for r in rs:
-                    st.write(f"- {r}")
-        else:
-            # riepilogo numeri
-            exp_avg = corner_reco.get("expected_total_avg", 0.0)
-            exp_std = corner_reco.get("expected_total_std", 0.0)
-            exp_tr = corner_reco.get("expected_trend", 0.0)
-
-            st.markdown(
-                f"""
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f"""
 <div class="card">
-<b>Corner — stima da trend recenti</b><br/>
-<span class="pill">Media corner totali attesa: <b>{exp_avg:.2f}</b></span>
-<span class="pill">Variabilità (std): <b>{exp_std:.2f}</b></span>
-<span class="pill">Trend ultimi 5 vs 10: <b>{exp_tr:+.2f}</b></span>
+<b>{hn} vs {an}</b><br/>
+<span class="small-muted">Stagione stimata: {pick.season}/{pick.season+1}</span><br/>
+<span class="small-muted">{pick.message}</span>
 </div>
 """,
-                unsafe_allow_html=True,
-            )
+                        unsafe_allow_html=True,
+                    )
 
-            colx1, colx2, colx3 = st.columns(3, gap="large")
-            with colx1:
-                st.markdown("### 🛡️ Prudente")
-                st.write(f"✅ **{corner_reco['prudente']}**")
-                st.caption("Linea più bassa: più probabilità, quota più bassa.")
-            with colx2:
-                st.markdown("### ⚖️ Medio")
-                st.write(f"✅ **{corner_reco['medio']}**")
-                st.caption("Linea “centrale”: equilibrio tra rischio e quota.")
-            with colx3:
-                st.markdown("### 🔥 Aggressivo")
-                st.write(f"✅ **{corner_reco['aggressivo']}**")
-                st.caption("Linea più alta: più quota, più rischio.")
+                c1, c2 = st.columns(2, gap="large")
 
-            if corner_reco.get("team_pick"):
-                st.info(f"💡 Opzione Team Corner: **{corner_reco['team_pick']}**")
+                def team_block(title: str, s: Dict[str, Any], inj_count: int):
+                    stars = "★" * min(5, max(1, int(round(clamp(s["ppg"], 0.0, 3.0) / 0.6))))
+                    st.markdown(f"### {title}")
+                    st.write(f"- Forma (ultimi {s['matches']}): **{stars}**  ({s['form']})")
+                    st.write(f"- PPG: **{s['ppg']:.2f}**  |  Punti: **{s['points']}**")
+                    st.write(f"- Gol fatti/subiti: **{s['gf']} / {s['ga']}**")
+                    st.write(f"- Media gol totali: **{s['avg_total_goals']:.2f}**")
+                    st.write(f"- Infortuni/Squalifiche (eventi API): **{inj_count}**")
 
-            if corner_combos:
-                st.markdown("### 💥 Combo più spinte (stake piccolo)")
-                st.caption("Sono solo idee basate sui trend, non previsioni.")
-                for c in corner_combos:
-                    st.write(f"- {c}")
+                with c1:
+                    team_block(f"🏠 {hn}", home_sum, len(inj_home))
+                with c2:
+                    team_block(f"✈️ {an}", away_sum, len(inj_away))
 
-        with st.expander("📌 Dettagli tecnici (solo se serve)", expanded=False):
-            st.write("Ultimi fixtures Team A:", len(a_last))
-            st.write("Ultimi fixtures Team B:", len(b_last))
-            st.write("Injuries A:", len(inj_a))
-            st.write("Injuries B:", len(inj_b))
-            st.write("---")
-            st.write("Corner profile A:", a_corner)
-            st.write("Corner profile B:", b_corner)
+                st.markdown("---")
+                st.markdown("## 🧠 Consigli (chiari, NON certezze)")
+
+                primary = rec["primary"]
+                outcome = rec["outcome"]
+                alts = rec["alternatives"]
+                rates = rec["meta"]["rates"]
+
+                left, right = st.columns(2, gap="large")
+                with left:
+                    st.markdown("### ⚽ Goal / Over / Under")
+                    st.markdown(
+                        f"""
+<div class="card">
+<b>🎯 Scelta consigliata:</b> <span class="badge">{primary['risk']}</span><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{primary['market']}</h3>
+<span class="small-muted">{primary['why']}</span><br/><br/>
+<span class="small-muted">Indicatori: Over1.5 ≈ {rates['o15']*100:.0f}% · Over2.5 ≈ {rates['o25']*100:.0f}% · Over3.5 ≈ {rates['o35']*100:.0f}% · Under4.5 ≈ {rates['u45']*100:.0f}% · BTTS ≈ {rates['btts_yes']*100:.0f}%</span>
+</div>
+""",
+                        unsafe_allow_html=True,
+                    )
+                    for a in alts:
+                        if a["market"] in {"1X", "X2", "12"}:
+                            continue
+                        st.markdown(
+                            f"""
+<div class="card">
+<b>Alternativa:</b> <span class="badge">{a['risk']}</span><br/>
+<b style="font-size:1.1rem;">{a['market']}</b><br/>
+<span class="small-muted">{a['why']}</span>
+</div>
+""",
+                            unsafe_allow_html=True,
+                        )
+
+                with right:
+                    st.markdown("### 🏁 Esito (Doppia Chance)")
+                    st.markdown(
+                        f"""
+<div class="card">
+<b>🎯 Scelta consigliata (prudente):</b> <span class="badge">{outcome['risk']}</span><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{outcome['market']}</h3>
+<span class="small-muted">{outcome['why']}</span><br/><br/>
+<span class="small-muted"><b>Mini guida:</b> 1X = casa o pareggio · X2 = trasferta o pareggio · 12 = una delle due vince (no pareggio).</span>
+</div>
+""",
+                        unsafe_allow_html=True,
+                    )
+
+                # ✅ NUOVO: CORNER SECTION (se disponibili)
+                st.markdown("---")
+                st.markdown("## 🎯 Corner (3 livelli) — più aggressivo")
+                st.caption("Sezione separata: più rischio, stake più piccolo. Se l’API non dà corner, lo diciamo chiaramente.")
+
+                if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
+                    st.info("Corner: dati non disponibili su questi match (dipende dall’API/piano).")
+                else:
+                    if corner_reco.get("no_bet"):
+                        st.warning("⚠️ Corner: meglio NON forzare (NO BET).")
+                        for r in corner_reco.get("no_bet_reasons", []):
+                            st.write(f"- {r}")
+                    else:
+                        st.markdown(
+                            f"""
+<div class="card">
+<b>Corner — numeri stimati</b><br/>
+<span class="small-muted">Media corner attesa: <b>{corner_reco['expected_total_avg']:.2f}</b> · Variabilità: <b>{corner_reco['expected_total_std']:.2f}</b> · Trend ultimi 5 vs 10: <b>{corner_reco['expected_trend']:+.2f}</b></span>
+</div>
+""",
+                            unsafe_allow_html=True,
+                        )
+                        cc1, cc2, cc3 = st.columns(3)
+                        with cc1:
+                            st.markdown("### 🛡️ Prudente")
+                            st.write(f"✅ **{corner_reco['prudente']}**")
+                        with cc2:
+                            st.markdown("### ⚖️ Medio")
+                            st.write(f"✅ **{corner_reco['medio']}**")
+                        with cc3:
+                            st.markdown("### 🔥 Aggressivo")
+                            st.write(f"✅ **{corner_reco['aggressivo']}**")
+
+                        if corner_reco.get("team_pick"):
+                            st.info(f"💡 Opzione Team Corner: **{corner_reco['team_pick']}**")
+
+    # ====== MODE 2: Inserimento manuale ======
+    with mode_tabs[1]:
+        st.markdown("### ✍️ Inserisci partita manualmente")
+
+        colA, colB = st.columns([2, 1], gap="large")
+        with colA:
+            match_text = st.text_input("Partita", value=st.session_state.get("match_text", ""), placeholder="Es: AC Milan - Como")
+        with colB:
+            league_label = st.selectbox("Campionato (consigliato)", options=["Auto"] + list(DEFAULT_LEAGUES.keys()), index=0)
+            league_id = None if league_label == "Auto" else DEFAULT_LEAGUES[league_label]
+
+        st.session_state["match_text"] = match_text
+
+        if st.button("🔎 Analizza (manuale)", type="primary", use_container_width=True):
+            parsed = parse_match_input(match_text)
+            if not parsed:
+                st.error("Scrivi la partita tipo: 'Juve - Atalanta' oppure 'Juve-Atalanta'.")
+                st.stop()
+
+            home_name_in, away_name_in = parsed
+
+            with st.spinner("Cerco squadre su API-FOOTBALL..."):
+                home_candidates = search_team(api_football_key, home_name_in)
+                away_candidates = search_team(api_football_key, away_name_in)
+
+            if not home_candidates:
+                st.error(f"Non trovo la squadra: {home_name_in}")
+                st.stop()
+            if not away_candidates:
+                st.error(f"Non trovo la squadra: {away_name_in}")
+                st.stop()
+
+            def pick_best(cands: List[Dict[str, Any]], q: str) -> Dict[str, Any]:
+                qn = norm_team_name(q)
+                best = cands[0]
+                best_score = -1
+                for c in cands:
+                    name = (c.get("team", {}) or {}).get("name", "") or ""
+                    nn = norm_team_name(name)
+                    score = 0
+                    if nn == qn:
+                        score += 100
+                    if qn in nn:
+                        score += 40
+                    score += max(0, 20 - abs(len(nn) - len(qn)))
+                    if score > best_score:
+                        best_score = score
+                        best = c
+                return best
+
+            home_team = pick_best(home_candidates, home_name_in)
+            away_team = pick_best(away_candidates, away_name_in)
+
+            home_id = (home_team.get("team", {}) or {}).get("id")
+            away_id = (away_team.get("team", {}) or {}).get("id")
+            home_real = (home_team.get("team", {}) or {}).get("name", home_name_in)
+            away_real = (away_team.get("team", {}) or {}).get("name", away_name_in)
+
+            if not home_id or not away_id:
+                st.error("Errore: ID squadra non disponibile.")
+                st.stop()
+
+            with st.spinner("Analizzo..."):
+                result = analyze_by_team_ids(api_football_key, int(home_id), int(away_id), league_id, home_real, away_real)
+
+            st.session_state["last_analysis_result"] = result
+            st.session_state["last_analysis_source"] = "manual"
+
+        res = st.session_state.get("last_analysis_result")
+        if res and st.session_state.get("last_analysis_source") == "manual":
+            pick = res["pick"]
+            home_sum = res["home_sum"]
+            away_sum = res["away_sum"]
+            inj_home = res["inj_home"]
+            inj_away = res["inj_away"]
+            rec = res["rec"]
+            hn = res["home_name"]
+            an = res["away_name"]
+            corner_reco = res.get("corner_reco")
+
+            st.success("✅ Analisi pronta")
+
+            if pick.fixture:
+                fx = pick.fixture
+                fx_date = ((fx.get("fixture", {}) or {}).get("date")) or ""
+                league = fx.get("league", {}) or {}
+                st.markdown(
+                    f"""
+<div class="card">
+<b>{hn} vs {an}</b><br/>
+<span class="small-muted">Fixture: {fx_date} | League: {league.get("name","?")} (ID {league.get("id","?")}) | Stagione: {pick.season}/{pick.season+1}</span><br/>
+<span class="small-muted">{pick.message}</span>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"""
+<div class="card">
+<b>{hn} vs {an}</b><br/>
+<span class="small-muted">Stagione stimata: {pick.season}/{pick.season+1}</span><br/>
+<span class="small-muted">{pick.message}</span>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+
+            c1, c2 = st.columns(2, gap="large")
+
+            def team_block(title: str, s: Dict[str, Any], inj_count: int):
+                stars = "★" * min(5, max(1, int(round(clamp(s["ppg"], 0.0, 3.0) / 0.6))))
+                st.markdown(f"### {title}")
+                st.write(f"- Forma (ultimi {s['matches']}): **{stars}**  ({s['form']})")
+                st.write(f"- PPG: **{s['ppg']:.2f}**  |  Punti: **{s['points']}**")
+                st.write(f"- Gol fatti/subiti: **{s['gf']} / {s['ga']}**")
+                st.write(f"- Media gol totali: **{s['avg_total_goals']:.2f}**")
+                st.write(f"- Infortuni/Squalifiche (eventi API): **{inj_count}**")
+
+            with c1:
+                team_block(f"🏠 {hn}", home_sum, len(inj_home))
+            with c2:
+                team_block(f"✈️ {an}", away_sum, len(inj_away))
+
+            st.markdown("---")
+            st.markdown("## 🧠 Consigli (chiari, NON certezze)")
+
+            primary = rec["primary"]
+            outcome = rec["outcome"]
+            alts = rec["alternatives"]
+            rates = rec["meta"]["rates"]
+
+            left, right = st.columns(2, gap="large")
+            with left:
+                st.markdown("### ⚽ Goal / Over / Under")
+                st.markdown(
+                    f"""
+<div class="card">
+<b>🎯 Scelta consigliata:</b> <span class="badge">{primary['risk']}</span><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{primary['market']}</h3>
+<span class="small-muted">{primary['why']}</span><br/><br/>
+<span class="small-muted">Indicatori: Over1.5 ≈ {rates['o15']*100:.0f}% · Over2.5 ≈ {rates['o25']*100:.0f}% · Over3.5 ≈ {rates['o35']*100:.0f}% · Under4.5 ≈ {rates['u45']*100:.0f}% · BTTS ≈ {rates['btts_yes']*100:.0f}%</span>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+                for a in alts:
+                    if a["market"] in {"1X", "X2", "12"}:
+                        continue
+                    st.markdown(
+                        f"""
+<div class="card">
+<b>Alternativa:</b> <span class="badge">{a['risk']}</span><br/>
+<b style="font-size:1.1rem;">{a['market']}</b><br/>
+<span class="small-muted">{a['why']}</span>
+</div>
+""",
+                        unsafe_allow_html=True,
+                    )
+
+            with right:
+                st.markdown("### 🏁 Esito (Doppia Chance)")
+                st.markdown(
+                    f"""
+<div class="card">
+<b>🎯 Scelta consigliata (prudente):</b> <span class="badge">{outcome['risk']}</span><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{outcome['market']}</h3>
+<span class="small-muted">{outcome['why']}</span><br/><br/>
+<span class="small-muted"><b>Mini guida:</b> 1X = casa o pareggio · X2 = trasferta o pareggio · 12 = una delle due vince (no pareggio).</span>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+
+            # ✅ NUOVO: CORNER SECTION (se disponibili)
+            st.markdown("---")
+            st.markdown("## 🎯 Corner (3 livelli) — più aggressivo")
+            st.caption("Sezione separata: più rischio, stake più piccolo. Se l’API non dà corner, lo diciamo chiaramente.")
+
+            if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
+                st.info("Corner: dati non disponibili su questi match (dipende dall’API/piano).")
+            else:
+                if corner_reco.get("no_bet"):
+                    st.warning("⚠️ Corner: meglio NON forzare (NO BET).")
+                    for r in corner_reco.get("no_bet_reasons", []):
+                        st.write(f"- {r}")
+                else:
+                    st.markdown(
+                        f"""
+<div class="card">
+<b>Corner — numeri stimati</b><br/>
+<span class="small-muted">Media corner attesa: <b>{corner_reco['expected_total_avg']:.2f}</b> · Variabilità: <b>{corner_reco['expected_total_std']:.2f}</b> · Trend ultimi 5 vs 10: <b>{corner_reco['expected_trend']:+.2f}</b></span>
+</div>
+""",
+                        unsafe_allow_html=True,
+                    )
+                    cc1, cc2, cc3 = st.columns(3)
+                    with cc1:
+                        st.markdown("### 🛡️ Prudente")
+                        st.write(f"✅ **{corner_reco['prudente']}**")
+                    with cc2:
+                        st.markdown("### ⚖️ Medio")
+                        st.write(f"✅ **{corner_reco['medio']}**")
+                    with cc3:
+                        st.markdown("### 🔥 Aggressivo")
+                        st.write(f"✅ **{corner_reco['aggressivo']}**")
+
+                    if corner_reco.get("team_pick"):
+                        st.info(f"💡 Opzione Team Corner: **{corner_reco['team_pick']}**")
 
 # -----------------------------
 # TAB 2: TRADING STOP MANUALE
@@ -923,7 +1258,7 @@ with tabs[1]:
         back_odds = st.number_input("Quota d’ingresso (reale)", min_value=1.01, value=float(st.session_state.get("back_odds", 1.80)), step=0.01, format="%.2f")
         market_label = st.selectbox(
             "Che cosa stai giocando?",
-            options=["Over 1.5", "Over 2.5", "Over 3.5", "Over 4.5", "Under 3.5", "Under 4.5", "Over 5.5", "Under 5.5", "Goal", "No Goal", "Corner Over 8.5", "Corner Over 9.5", "Corner Over 10.5"],
+            options=["Over 1.5", "Over 2.5", "Over 3.5", "Over 4.5", "Under 3.5", "Under 4.5", "Over 5.5", "Under 5.5", "Goal", "No Goal"],
             index=0,
         )
 
@@ -940,16 +1275,16 @@ with tabs[1]:
     st.markdown(
         """
 <div class="card">
-<b>📌 Nota importante (Over vs Under)</b><br/>
-Il calcolo della bancata è uguale per Over e Under: stai sempre facendo <i>BACK</i> e poi <i>LAY</i> sullo stesso mercato.<br/>
-<b>Regola pratica:</b> lo STOP lo usi quando la quota del tuo mercato <b>SALE</b> (ti sta andando contro).
+<b>📌 Nota importante</b><br/>
+Il calcolo della bancata è uguale per Over e Under: stai facendo <i>BACK</i> e poi <i>LAY</i> sullo stesso mercato.<br/>
+<b>STOP:</b> lo usi quando la quota <b>SALE</b> (ti va contro).
 </div>
 """,
         unsafe_allow_html=True,
     )
 
-    stop_steps = [25, 35, 50]  # puoi cambiare qui facilmente
-    st.markdown("## 🛑 Quote STOP pronte (ti prepari prima)")
+    stop_steps = [25, 35, 50]
+    st.markdown("## 🛑 Quote STOP pronte")
 
     if st.button("✅ CALCOLA (aggiorna risultati)", type="primary", use_container_width=True):
         plan = make_stop_plan(
@@ -960,7 +1295,6 @@ Il calcolo della bancata è uguale per Over e Under: stai sempre facendo <i>BACK
             min_profit_if_win=min_profit_if_win,
             stop_steps=stop_steps,
         )
-
         st.dataframe(plan, use_container_width=True)
 
         st.markdown("## 🚪 Uscita adesso (se sei già LIVE)")
@@ -969,6 +1303,7 @@ Il calcolo della bancata è uguale per Over e Under: stai sempre facendo <i>BACK
 
         comm = comm_pct / 100.0
         lay_stake_ = lay_stake_for_target_loss_when_lose(back_stake, max_loss_if_lose)
+
         if lay_stake_ <= 0:
             st.warning("Perdita max troppo bassa rispetto alla puntata: non c’è una bancata che limiti la perdita come vuoi.")
         else:
@@ -981,21 +1316,14 @@ Il calcolo della bancata è uguale per Over e Under: stai sempre facendo <i>BACK
 <div class="card">
 <b>{market_label}</b><br/>
 <b>BANCA consigliata adesso:</b> {lay_stake_:.2f} € @ {live_odds:.2f}<br/>
-<b>Liability (rischio se esce il mercato):</b> {liab:.2f} €<br/><br/>
+<b>Liability (rischio):</b> {liab:.2f} €<br/><br/>
 <b>Esiti stimati:</b><br/>
 - Se VINCI: <b>{win_p:+.2f} €</b><br/>
 - Se PERDI: <b>{lose_p:+.2f} €</b><br/>
-<span class="small-muted">Nota: stima semplificata con commissione applicata solo su profitto positivo.</span>
+<span class="small-muted">Stima semplificata: commissione applicata solo su profitto positivo.</span>
 </div>
 """,
                 unsafe_allow_html=True,
             )
     else:
         st.info("Imposta i valori e premi **CALCOLA**.")
-
-# =============================
-# The Odds API (opzionale)
-# =============================
-# Lasciata fuori dall'analisi per evitare confusione:
-# Qui usiamo manuale per quote (come mi hai chiesto).
-# Se vuoi reinserire quote automatiche in un secondo momento, lo facciamo in modo “safe”.
