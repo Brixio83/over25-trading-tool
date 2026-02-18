@@ -3,12 +3,14 @@
 # ✅ Modalità 1: "Partite del giorno" (max 10) + click per analisi
 # ✅ Modalità 2: Inserimento manuale partita (come prima)
 # ✅ Trading / Stop manuale (come prima)
-# ✅ AGGIUNTO: Champions League + Europa League (e Conference League opzionale)
-# ✅ NUOVO: Corner (3 livelli) - prudente / medio / aggressivo (se dati disponibili)
+# ✅ Champions League + Europa League (+ Conference opzionale)
+# ✅ Corner (con linee anche basse)
+# ✅ NUOVO: 2 suggerimenti chiari:
+#    - Singola (1 giocata)
+#    - Combinata (2 giocate, opzionale)
 #
 # --- STREAMLIT SECRETS (Settings → Secrets su Streamlit Cloud) ---
 # API_FOOTBALL_KEY = "la_tua_key_api_football"      # obbligatoria
-# THE_ODDS_API_KEY = "la_tua_key_odds_api"          # opzionale (non usata qui)
 #
 # NOTE: Non mettere le API key nel codice/GitHub.
 
@@ -37,10 +39,10 @@ DEFAULT_LEAGUES: Dict[str, int] = {
     "Ligue 1 (FRA)": 61,
     "Eredivisie (NED)": 88,
     "Primeira Liga (POR)": 94,
-    # ✅ Coppe Europee
+    # Coppe Europee
     "Champions League": 2,
     "Europa League": 3,
-    "Conference League": 848,  # opzionale ma utile
+    "Conference League": 848,
 }
 
 # =============================
@@ -157,7 +159,7 @@ def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[in
 def get_fixtures_by_date_and_league(api_key: str, day: str, league_id: int) -> List[Dict[str, Any]]:
     """
     day: 'YYYY-MM-DD'
-    ✅ Per Champions/Europa: la season è comunque "anno inizio" (es. 2025 per 2025/26)
+    season = anno inizio (es. 2025 per 2025/26)
     """
     season = season_for_date(now_utc())
     url = f"{API_FOOTBALL_BASE}/fixtures"
@@ -217,8 +219,9 @@ def find_fixture_smart(
         season=season,
     )
 
+
 # =============================
-# ✅ NUOVO: CORNER (STATISTICHE)
+# CORNER (STATISTICHE)
 # =============================
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
@@ -257,12 +260,15 @@ def _std(xs: List[float]) -> float:
     return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
 
 
-def _nearest_corner_line(x: float) -> float:
-    # linee tipiche: 6.5..12.5
+def _nearest_corner_line(x: float, lo: float = 3.5, hi: float = 12.5) -> float:
+    """
+    Ritorna linee .5 (4.5, 5.5, 6.5...) con clamp su un range.
+    Ho abbassato il minimo per darti più scelte (anche 4.5).
+    """
     v = round(x * 2.0) / 2.0
     if float(v).is_integer():
         v += 0.5
-    return float(max(6.5, min(12.5, v)))
+    return float(max(lo, min(hi, v)))
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
@@ -340,16 +346,24 @@ def build_corner_recos(a_c: Dict[str, Any], b_c: Dict[str, Any], a_name: str, b_
     reasons = []
     if min_used < 6:
         reasons.append("pochi dati corner (meno di 6 match con statistiche)")
-    if total_avg_expected < 7.2:
+    if total_avg_expected < 7.0:
         reasons.append("media corner totale bassa")
     if total_std_expected > 3.2:
         reasons.append("corner molto variabili (rischio alto)")
 
     no_bet = len(reasons) >= 2
 
-    line_prud = _nearest_corner_line(total_avg_expected - 0.7)
-    line_med = _nearest_corner_line(total_avg_expected)
-    line_aggr = _nearest_corner_line(total_avg_expected + 1.0)
+    # Linee principali (3 livelli)
+    line_prud = _nearest_corner_line(total_avg_expected - 1.2, lo=3.5, hi=12.5)
+    line_med = _nearest_corner_line(total_avg_expected - 0.3, lo=3.5, hi=12.5)
+    line_aggr = _nearest_corner_line(total_avg_expected + 0.9, lo=3.5, hi=12.5)
+
+    # Linee "basse" extra (per più scelte)
+    low1 = _nearest_corner_line(total_avg_expected - 2.2, lo=3.5, hi=12.5)
+    low2 = _nearest_corner_line(total_avg_expected - 1.7, lo=3.5, hi=12.5)
+    low3 = _nearest_corner_line(total_avg_expected - 1.2, lo=3.5, hi=12.5)  # coincide con prud, ok
+
+    lows = sorted(list({low1, low2, low3, line_prud}), key=lambda x: x)
 
     a_for = a_c.get("for_avg", 0.0)
     b_for = b_c.get("for_avg", 0.0)
@@ -368,8 +382,20 @@ def build_corner_recos(a_c: Dict[str, Any], b_c: Dict[str, Any], a_name: str, b_
         "prudente": f"Over {line_prud:.1f} Corner",
         "medio": f"Over {line_med:.1f} Corner",
         "aggressivo": f"Over {line_aggr:.1f} Corner",
+        "low_lines": [f"Over {x:.1f} Corner" for x in lows],  # ✅ linee basse extra
         "team_pick": team_pick,
     }
+
+
+def parse_corner_line_value(label: str) -> Optional[float]:
+    # "Over 8.5 Corner" -> 8.5
+    try:
+        m = re.search(r"over\s+([0-9]+(?:\.[0-9])?)", label.strip().lower())
+        if not m:
+            return None
+        return float(m.group(1))
+    except Exception:
+        return None
 
 
 # =============================
@@ -538,6 +564,142 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
 
 
 # =============================
+# ✅ NUOVO: DUE CONSIGLI (Singola + Combinata)
+# =============================
+
+def goals_confidence(rates: Dict[str, float], market: str) -> float:
+    # proxy (non è probabilità reale)
+    if market == "Over 1.5":
+        return clamp(rates.get("o15", 0.0), 0.0, 0.95)
+    if market == "Over 2.5":
+        return clamp(rates.get("o25", 0.0), 0.0, 0.90)
+    if market == "Over 3.5":
+        return clamp(rates.get("o35", 0.0), 0.0, 0.85)
+    if market == "Under 3.5":
+        return clamp(rates.get("u35", 0.0), 0.0, 0.92)
+    if market == "Under 4.5":
+        return clamp(rates.get("u45", 0.0), 0.0, 0.95)
+    if market == "Goal (BTTS Sì)":
+        return clamp(rates.get("btts_yes", 0.0), 0.0, 0.85)
+    if market == "No Goal (BTTS No)":
+        return clamp(1.0 - rates.get("btts_yes", 0.0), 0.0, 0.85)
+    return 0.40
+
+
+def outcome_confidence(outcome_market: str, home_ppg: float, away_ppg: float) -> float:
+    diff = abs(home_ppg - away_ppg)
+    if outcome_market in {"1X", "X2"}:
+        return clamp(0.45 + diff * 0.35, 0.45, 0.90)
+    if outcome_market == "12":
+        return clamp(0.35 + diff * 0.20, 0.35, 0.70)
+    return 0.40
+
+
+def corner_confidence(corner_reco: Dict[str, Any]) -> float:
+    if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
+        return 0.0
+    if corner_reco.get("no_bet"):
+        return 0.25
+    stdv = float(corner_reco.get("expected_total_std", 0.0))
+    c = 1.0 - clamp((stdv - 1.5) / 3.0, 0.0, 0.7)
+    return clamp(c, 0.15, 0.95)
+
+
+def pick_best_single(rec: Dict[str, Any], home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sceglie 1 singola tra:
+      - primary (Goal/Over/Under)
+      - outcome (1X/X2/12)
+    in base ad una "coerenza dati" semplice.
+    """
+    rates = rec["meta"]["rates"]
+    primary = rec["primary"]
+    outcome = rec["outcome"]
+
+    p_conf = goals_confidence(rates, primary["market"])
+    o_conf = outcome_confidence(outcome["market"], float(home_sum.get("ppg", 0.0)), float(away_sum.get("ppg", 0.0)))
+
+    if o_conf > p_conf + 0.04:
+        return {
+            "market": outcome["market"],
+            "type": "Doppia Chance",
+            "signal": o_conf,
+            "why": outcome["why"],
+            "risk": outcome["risk"],
+        }
+    else:
+        return {
+            "market": primary["market"],
+            "type": "Goal / Over / Under",
+            "signal": p_conf,
+            "why": primary["why"],
+            "risk": primary["risk"],
+        }
+
+
+def pick_combo_suggestion(single_pick: Dict[str, Any], corner_reco: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Suggerisce 1 combinata = (singola migliore) + (over corner linea bassa coerente).
+    Se corner non affidabili -> dice che non conviene forzare.
+    """
+    c_conf = corner_confidence(corner_reco)
+    if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
+        return {
+            "ok": False,
+            "legs": [],
+            "why": ["Corner non disponibili per questo match (dipende dall’API/piano)."],
+            "corner_lines": [],
+        }
+
+    if corner_reco.get("no_bet"):
+        return {
+            "ok": False,
+            "legs": [],
+            "why": ["Corner: meglio NON forzare (dati pochi o troppo variabili)."] + corner_reco.get("no_bet_reasons", []),
+            "corner_lines": corner_reco.get("low_lines", []),
+        }
+
+    # scegliamo la linea corner più bassa tra quelle proposte (più facile da prendere)
+    lows = corner_reco.get("low_lines", []) or []
+    if not lows:
+        # fallback
+        lows = [corner_reco.get("prudente", "Over 6.5 Corner")]
+
+    # prendi la più bassa numericamente
+    best_line = None
+    best_val = None
+    for lab in lows:
+        v = parse_corner_line_value(lab)
+        if v is None:
+            continue
+        if best_val is None or v < best_val:
+            best_val = v
+            best_line = lab
+    best_line = best_line or lows[0]
+
+    why = []
+    why.append(f"Base: **{single_pick['market']}** (scelto come singola migliore).")
+    why.append(f"Corner: scelgo una linea **bassa** per darti più probabilità (tra le opzioni).")
+    if c_conf < 0.45:
+        why.append("Nota: corner non super solidi → meglio linee basse e stake piccolo.")
+
+    return {
+        "ok": True,
+        "legs": [single_pick["market"], best_line],
+        "why": why,
+        "corner_lines": lows,  # così l’utente vede anche altre linee basse
+    }
+
+
+def signal_badge(x: float) -> str:
+    if x >= 0.72:
+        return "🔵 Alta coerenza dati"
+    if x >= 0.60:
+        return "🟣 Media coerenza dati"
+    return "🟠 Bassa coerenza dati (più rischio)"
+
+
+# =============================
 # "TOP 10 DEL GIORNO"
 # =============================
 
@@ -590,10 +752,13 @@ def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Opt
 
     rec = recommend_for_match(home_sum, away_sum)
 
-    # ✅ NUOVO: CORNER PROFILE + RECO (non blocca nulla se non ci sono dati)
     a_corner = compute_team_corner_profile(api_key, int(home_id), season, last_n=10)
     b_corner = compute_team_corner_profile(api_key, int(away_id), season, last_n=10)
     corner_reco = build_corner_recos(a_corner, b_corner, home_name, away_name)
+
+    # ✅ due consigli
+    single_pick = pick_best_single(rec, home_sum, away_sum)
+    combo_pick = pick_combo_suggestion(single_pick, corner_reco)
 
     return {
         "pick": pick,
@@ -608,6 +773,8 @@ def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Opt
         "corner_a": a_corner,
         "corner_b": b_corner,
         "corner_reco": corner_reco,
+        "single_pick": single_pick,
+        "combo_pick": combo_pick,
     }
 
 
@@ -781,6 +948,208 @@ if not api_football_key:
 
 tabs = st.tabs(["📊 Analisi partita (PRO)", "🧮 Trading / Stop (Manuale)"])
 
+
+def render_analysis(res: Dict[str, Any]):
+    pick = res["pick"]
+    home_sum = res["home_sum"]
+    away_sum = res["away_sum"]
+    inj_home = res["inj_home"]
+    inj_away = res["inj_away"]
+    rec = res["rec"]
+    hn = res["home_name"]
+    an = res["away_name"]
+    corner_reco = res.get("corner_reco")
+    single_pick = res.get("single_pick")
+    combo_pick = res.get("combo_pick")
+
+    st.success("✅ Analisi pronta")
+
+    if pick.fixture:
+        fx = pick.fixture
+        fx_date = ((fx.get("fixture", {}) or {}).get("date")) or ""
+        league = fx.get("league", {}) or {}
+        st.markdown(
+            f"""
+<div class="card">
+<b>{hn} vs {an}</b><br/>
+<span class="small-muted">Fixture: {fx_date} | League: {league.get("name","?")} (ID {league.get("id","?")}) | Stagione: {pick.season}/{pick.season+1}</span><br/>
+<span class="small-muted">{pick.message}</span>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""
+<div class="card">
+<b>{hn} vs {an}</b><br/>
+<span class="small-muted">Stagione stimata: {pick.season}/{pick.season+1}</span><br/>
+<span class="small-muted">{pick.message}</span>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    c1, c2 = st.columns(2, gap="large")
+
+    def team_block(title: str, s: Dict[str, Any], inj_count: int):
+        stars = "★" * min(5, max(1, int(round(clamp(s["ppg"], 0.0, 3.0) / 0.6))))
+        st.markdown(f"### {title}")
+        st.write(f"- Forma (ultimi {s['matches']}): **{stars}**  ({s['form']})")
+        st.write(f"- PPG: **{s['ppg']:.2f}**  |  Punti: **{s['points']}**")
+        st.write(f"- Gol fatti/subiti: **{s['gf']} / {s['ga']}**")
+        st.write(f"- Media gol totali: **{s['avg_total_goals']:.2f}**")
+        st.write(f"- Infortuni/Squalifiche (eventi API): **{inj_count}**")
+
+    with c1:
+        team_block(f"🏠 {hn}", home_sum, len(inj_home))
+    with c2:
+        team_block(f"✈️ {an}", away_sum, len(inj_away))
+
+    st.markdown("---")
+    st.markdown("## 🎯 Due consigli (semplici)")
+
+    if single_pick:
+        st.markdown(
+            f"""
+<div class="card">
+<b>✅ Consiglio SINGOLA (1 giocata):</b> <span class="badge">{single_pick['risk']}</span><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{single_pick['market']}</h3>
+<span class="small-muted"><b>Tipo:</b> {single_pick['type']} · <b>Coerenza dati:</b> {signal_badge(float(single_pick['signal']))}</span><br/><br/>
+<span class="small-muted">{single_pick['why']}</span>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    if combo_pick:
+        if combo_pick.get("ok"):
+            legs = combo_pick["legs"]
+            st.markdown(
+                f"""
+<div class="card">
+<b>➕ Consiglio COMBINATA (opzionale):</b><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{legs[0]} + {legs[1]}</h3>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+            st.write("Perché:")
+            for r in combo_pick.get("why", []):
+                st.write(f"- {r}")
+
+            # linee corner basse extra per scelta manuale
+            lines = combo_pick.get("corner_lines", []) or []
+            if lines:
+                st.markdown("**Corner (linee più basse disponibili, scegli tu):**")
+                st.write(" · ".join(lines[:6]))
+        else:
+            st.markdown(
+                """
+<div class="card">
+<b>➕ Combinata:</b> non consigliata su questo match (corner non affidabili o non disponibili).<br/>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+            for r in combo_pick.get("why", []):
+                st.write(f"- {r}")
+            lines = combo_pick.get("corner_lines", []) or []
+            if lines:
+                st.markdown("**Comunque, linee corner basse disponibili:**")
+                st.write(" · ".join(lines[:6]))
+
+    st.markdown("---")
+    st.markdown("## 🧠 Dettagli consigli (come prima, NON certezze)")
+
+    primary = rec["primary"]
+    outcome = rec["outcome"]
+    alts = rec["alternatives"]
+    rates = rec["meta"]["rates"]
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("### ⚽ Goal / Over / Under")
+        st.markdown(
+            f"""
+<div class="card">
+<b>🎯 Scelta consigliata:</b> <span class="badge">{primary['risk']}</span><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{primary['market']}</h3>
+<span class="small-muted">{primary['why']}</span><br/><br/>
+<span class="small-muted">Indicatori: Over1.5 ≈ {rates['o15']*100:.0f}% · Over2.5 ≈ {rates['o25']*100:.0f}% · Over3.5 ≈ {rates['o35']*100:.0f}% · Under4.5 ≈ {rates['u45']*100:.0f}% · BTTS ≈ {rates['btts_yes']*100:.0f}%</span>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+        for a in alts:
+            if a["market"] in {"1X", "X2", "12"}:
+                continue
+            st.markdown(
+                f"""
+<div class="card">
+<b>Alternativa:</b> <span class="badge">{a['risk']}</span><br/>
+<b style="font-size:1.1rem;">{a['market']}</b><br/>
+<span class="small-muted">{a['why']}</span>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+    with right:
+        st.markdown("### 🏁 Esito (Doppia Chance)")
+        st.markdown(
+            f"""
+<div class="card">
+<b>🎯 Scelta consigliata (prudente):</b> <span class="badge">{outcome['risk']}</span><br/>
+<h3 style="margin-top:8px;margin-bottom:8px;">{outcome['market']}</h3>
+<span class="small-muted">{outcome['why']}</span><br/><br/>
+<span class="small-muted"><b>Mini guida:</b> 1X = casa o pareggio · X2 = trasferta o pareggio · 12 = una delle due vince (no pareggio).</span>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+    st.markdown("## 🎯 Corner (3 livelli) + linee basse")
+    st.caption("Sezione separata: più rischio. Se l’API non dà corner, lo diciamo chiaramente.")
+
+    if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
+        st.info("Corner: dati non disponibili su questi match (dipende dall’API/piano).")
+    else:
+        if corner_reco.get("no_bet"):
+            st.warning("⚠️ Corner: meglio NON forzare (NO BET).")
+            for r in corner_reco.get("no_bet_reasons", []):
+                st.write(f"- {r}")
+        else:
+            st.markdown(
+                f"""
+<div class="card">
+<b>Corner — numeri stimati</b><br/>
+<span class="small-muted">Media corner attesa: <b>{corner_reco['expected_total_avg']:.2f}</b> · Variabilità: <b>{corner_reco['expected_total_std']:.2f}</b> · Trend ultimi 5 vs 10: <b>{corner_reco['expected_trend']:+.2f}</b></span>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+            cc1, cc2, cc3 = st.columns(3)
+            with cc1:
+                st.markdown("### 🛡️ Prudente")
+                st.write(f"✅ **{corner_reco['prudente']}**")
+            with cc2:
+                st.markdown("### ⚖️ Medio")
+                st.write(f"✅ **{corner_reco['medio']}**")
+            with cc3:
+                st.markdown("### 🔥 Aggressivo")
+                st.write(f"✅ **{corner_reco['aggressivo']}**")
+
+            lows = corner_reco.get("low_lines", []) or []
+            if lows:
+                st.markdown("**Linee corner più basse (più facili):**")
+                st.write(" · ".join(lows[:6]))
+
+            if corner_reco.get("team_pick"):
+                st.info(f"💡 Opzione Team Corner: **{corner_reco['team_pick']}**")
+
+
 # -----------------------------
 # TAB 1: ANALISI PRO
 # -----------------------------
@@ -892,145 +1261,7 @@ with tabs[0]:
 
             res = st.session_state.get("last_analysis_result")
             if res and st.session_state.get("last_analysis_source") == "day":
-                pick = res["pick"]
-                home_sum = res["home_sum"]
-                away_sum = res["away_sum"]
-                inj_home = res["inj_home"]
-                inj_away = res["inj_away"]
-                rec = res["rec"]
-                hn = res["home_name"]
-                an = res["away_name"]
-                corner_reco = res.get("corner_reco")
-
-                st.success("✅ Analisi pronta")
-
-                if pick.fixture:
-                    fx = pick.fixture
-                    fx_date = ((fx.get("fixture", {}) or {}).get("date")) or ""
-                    league = fx.get("league", {}) or {}
-                    st.markdown(
-                        f"""
-<div class="card">
-<b>{hn} vs {an}</b><br/>
-<span class="small-muted">Fixture: {fx_date} | League: {league.get("name","?")} (ID {league.get("id","?")}) | Stagione: {pick.season}/{pick.season+1}</span><br/>
-<span class="small-muted">{pick.message}</span>
-</div>
-""",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        f"""
-<div class="card">
-<b>{hn} vs {an}</b><br/>
-<span class="small-muted">Stagione stimata: {pick.season}/{pick.season+1}</span><br/>
-<span class="small-muted">{pick.message}</span>
-</div>
-""",
-                        unsafe_allow_html=True,
-                    )
-
-                c1, c2 = st.columns(2, gap="large")
-
-                def team_block(title: str, s: Dict[str, Any], inj_count: int):
-                    stars = "★" * min(5, max(1, int(round(clamp(s["ppg"], 0.0, 3.0) / 0.6))))
-                    st.markdown(f"### {title}")
-                    st.write(f"- Forma (ultimi {s['matches']}): **{stars}**  ({s['form']})")
-                    st.write(f"- PPG: **{s['ppg']:.2f}**  |  Punti: **{s['points']}**")
-                    st.write(f"- Gol fatti/subiti: **{s['gf']} / {s['ga']}**")
-                    st.write(f"- Media gol totali: **{s['avg_total_goals']:.2f}**")
-                    st.write(f"- Infortuni/Squalifiche (eventi API): **{inj_count}**")
-
-                with c1:
-                    team_block(f"🏠 {hn}", home_sum, len(inj_home))
-                with c2:
-                    team_block(f"✈️ {an}", away_sum, len(inj_away))
-
-                st.markdown("---")
-                st.markdown("## 🧠 Consigli (chiari, NON certezze)")
-
-                primary = rec["primary"]
-                outcome = rec["outcome"]
-                alts = rec["alternatives"]
-                rates = rec["meta"]["rates"]
-
-                left, right = st.columns(2, gap="large")
-                with left:
-                    st.markdown("### ⚽ Goal / Over / Under")
-                    st.markdown(
-                        f"""
-<div class="card">
-<b>🎯 Scelta consigliata:</b> <span class="badge">{primary['risk']}</span><br/>
-<h3 style="margin-top:8px;margin-bottom:8px;">{primary['market']}</h3>
-<span class="small-muted">{primary['why']}</span><br/><br/>
-<span class="small-muted">Indicatori: Over1.5 ≈ {rates['o15']*100:.0f}% · Over2.5 ≈ {rates['o25']*100:.0f}% · Over3.5 ≈ {rates['o35']*100:.0f}% · Under4.5 ≈ {rates['u45']*100:.0f}% · BTTS ≈ {rates['btts_yes']*100:.0f}%</span>
-</div>
-""",
-                        unsafe_allow_html=True,
-                    )
-                    for a in alts:
-                        if a["market"] in {"1X", "X2", "12"}:
-                            continue
-                        st.markdown(
-                            f"""
-<div class="card">
-<b>Alternativa:</b> <span class="badge">{a['risk']}</span><br/>
-<b style="font-size:1.1rem;">{a['market']}</b><br/>
-<span class="small-muted">{a['why']}</span>
-</div>
-""",
-                            unsafe_allow_html=True,
-                        )
-
-                with right:
-                    st.markdown("### 🏁 Esito (Doppia Chance)")
-                    st.markdown(
-                        f"""
-<div class="card">
-<b>🎯 Scelta consigliata (prudente):</b> <span class="badge">{outcome['risk']}</span><br/>
-<h3 style="margin-top:8px;margin-bottom:8px;">{outcome['market']}</h3>
-<span class="small-muted">{outcome['why']}</span><br/><br/>
-<span class="small-muted"><b>Mini guida:</b> 1X = casa o pareggio · X2 = trasferta o pareggio · 12 = una delle due vince (no pareggio).</span>
-</div>
-""",
-                        unsafe_allow_html=True,
-                    )
-
-                # ✅ NUOVO: CORNER SECTION (se disponibili)
-                st.markdown("---")
-                st.markdown("## 🎯 Corner (3 livelli) — più aggressivo")
-                st.caption("Sezione separata: più rischio, stake più piccolo. Se l’API non dà corner, lo diciamo chiaramente.")
-
-                if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
-                    st.info("Corner: dati non disponibili su questi match (dipende dall’API/piano).")
-                else:
-                    if corner_reco.get("no_bet"):
-                        st.warning("⚠️ Corner: meglio NON forzare (NO BET).")
-                        for r in corner_reco.get("no_bet_reasons", []):
-                            st.write(f"- {r}")
-                    else:
-                        st.markdown(
-                            f"""
-<div class="card">
-<b>Corner — numeri stimati</b><br/>
-<span class="small-muted">Media corner attesa: <b>{corner_reco['expected_total_avg']:.2f}</b> · Variabilità: <b>{corner_reco['expected_total_std']:.2f}</b> · Trend ultimi 5 vs 10: <b>{corner_reco['expected_trend']:+.2f}</b></span>
-</div>
-""",
-                            unsafe_allow_html=True,
-                        )
-                        cc1, cc2, cc3 = st.columns(3)
-                        with cc1:
-                            st.markdown("### 🛡️ Prudente")
-                            st.write(f"✅ **{corner_reco['prudente']}**")
-                        with cc2:
-                            st.markdown("### ⚖️ Medio")
-                            st.write(f"✅ **{corner_reco['medio']}**")
-                        with cc3:
-                            st.markdown("### 🔥 Aggressivo")
-                            st.write(f"✅ **{corner_reco['aggressivo']}**")
-
-                        if corner_reco.get("team_pick"):
-                            st.info(f"💡 Opzione Team Corner: **{corner_reco['team_pick']}**")
+                render_analysis(res)
 
     # ====== MODE 2: Inserimento manuale ======
     with mode_tabs[1]:
@@ -1102,145 +1333,8 @@ with tabs[0]:
 
         res = st.session_state.get("last_analysis_result")
         if res and st.session_state.get("last_analysis_source") == "manual":
-            pick = res["pick"]
-            home_sum = res["home_sum"]
-            away_sum = res["away_sum"]
-            inj_home = res["inj_home"]
-            inj_away = res["inj_away"]
-            rec = res["rec"]
-            hn = res["home_name"]
-            an = res["away_name"]
-            corner_reco = res.get("corner_reco")
+            render_analysis(res)
 
-            st.success("✅ Analisi pronta")
-
-            if pick.fixture:
-                fx = pick.fixture
-                fx_date = ((fx.get("fixture", {}) or {}).get("date")) or ""
-                league = fx.get("league", {}) or {}
-                st.markdown(
-                    f"""
-<div class="card">
-<b>{hn} vs {an}</b><br/>
-<span class="small-muted">Fixture: {fx_date} | League: {league.get("name","?")} (ID {league.get("id","?")}) | Stagione: {pick.season}/{pick.season+1}</span><br/>
-<span class="small-muted">{pick.message}</span>
-</div>
-""",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f"""
-<div class="card">
-<b>{hn} vs {an}</b><br/>
-<span class="small-muted">Stagione stimata: {pick.season}/{pick.season+1}</span><br/>
-<span class="small-muted">{pick.message}</span>
-</div>
-""",
-                    unsafe_allow_html=True,
-                )
-
-            c1, c2 = st.columns(2, gap="large")
-
-            def team_block(title: str, s: Dict[str, Any], inj_count: int):
-                stars = "★" * min(5, max(1, int(round(clamp(s["ppg"], 0.0, 3.0) / 0.6))))
-                st.markdown(f"### {title}")
-                st.write(f"- Forma (ultimi {s['matches']}): **{stars}**  ({s['form']})")
-                st.write(f"- PPG: **{s['ppg']:.2f}**  |  Punti: **{s['points']}**")
-                st.write(f"- Gol fatti/subiti: **{s['gf']} / {s['ga']}**")
-                st.write(f"- Media gol totali: **{s['avg_total_goals']:.2f}**")
-                st.write(f"- Infortuni/Squalifiche (eventi API): **{inj_count}**")
-
-            with c1:
-                team_block(f"🏠 {hn}", home_sum, len(inj_home))
-            with c2:
-                team_block(f"✈️ {an}", away_sum, len(inj_away))
-
-            st.markdown("---")
-            st.markdown("## 🧠 Consigli (chiari, NON certezze)")
-
-            primary = rec["primary"]
-            outcome = rec["outcome"]
-            alts = rec["alternatives"]
-            rates = rec["meta"]["rates"]
-
-            left, right = st.columns(2, gap="large")
-            with left:
-                st.markdown("### ⚽ Goal / Over / Under")
-                st.markdown(
-                    f"""
-<div class="card">
-<b>🎯 Scelta consigliata:</b> <span class="badge">{primary['risk']}</span><br/>
-<h3 style="margin-top:8px;margin-bottom:8px;">{primary['market']}</h3>
-<span class="small-muted">{primary['why']}</span><br/><br/>
-<span class="small-muted">Indicatori: Over1.5 ≈ {rates['o15']*100:.0f}% · Over2.5 ≈ {rates['o25']*100:.0f}% · Over3.5 ≈ {rates['o35']*100:.0f}% · Under4.5 ≈ {rates['u45']*100:.0f}% · BTTS ≈ {rates['btts_yes']*100:.0f}%</span>
-</div>
-""",
-                    unsafe_allow_html=True,
-                )
-                for a in alts:
-                    if a["market"] in {"1X", "X2", "12"}:
-                        continue
-                    st.markdown(
-                        f"""
-<div class="card">
-<b>Alternativa:</b> <span class="badge">{a['risk']}</span><br/>
-<b style="font-size:1.1rem;">{a['market']}</b><br/>
-<span class="small-muted">{a['why']}</span>
-</div>
-""",
-                        unsafe_allow_html=True,
-                    )
-
-            with right:
-                st.markdown("### 🏁 Esito (Doppia Chance)")
-                st.markdown(
-                    f"""
-<div class="card">
-<b>🎯 Scelta consigliata (prudente):</b> <span class="badge">{outcome['risk']}</span><br/>
-<h3 style="margin-top:8px;margin-bottom:8px;">{outcome['market']}</h3>
-<span class="small-muted">{outcome['why']}</span><br/><br/>
-<span class="small-muted"><b>Mini guida:</b> 1X = casa o pareggio · X2 = trasferta o pareggio · 12 = una delle due vince (no pareggio).</span>
-</div>
-""",
-                    unsafe_allow_html=True,
-                )
-
-            # ✅ NUOVO: CORNER SECTION (se disponibili)
-            st.markdown("---")
-            st.markdown("## 🎯 Corner (3 livelli) — più aggressivo")
-            st.caption("Sezione separata: più rischio, stake più piccolo. Se l’API non dà corner, lo diciamo chiaramente.")
-
-            if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
-                st.info("Corner: dati non disponibili su questi match (dipende dall’API/piano).")
-            else:
-                if corner_reco.get("no_bet"):
-                    st.warning("⚠️ Corner: meglio NON forzare (NO BET).")
-                    for r in corner_reco.get("no_bet_reasons", []):
-                        st.write(f"- {r}")
-                else:
-                    st.markdown(
-                        f"""
-<div class="card">
-<b>Corner — numeri stimati</b><br/>
-<span class="small-muted">Media corner attesa: <b>{corner_reco['expected_total_avg']:.2f}</b> · Variabilità: <b>{corner_reco['expected_total_std']:.2f}</b> · Trend ultimi 5 vs 10: <b>{corner_reco['expected_trend']:+.2f}</b></span>
-</div>
-""",
-                        unsafe_allow_html=True,
-                    )
-                    cc1, cc2, cc3 = st.columns(3)
-                    with cc1:
-                        st.markdown("### 🛡️ Prudente")
-                        st.write(f"✅ **{corner_reco['prudente']}**")
-                    with cc2:
-                        st.markdown("### ⚖️ Medio")
-                        st.write(f"✅ **{corner_reco['medio']}**")
-                    with cc3:
-                        st.markdown("### 🔥 Aggressivo")
-                        st.write(f"✅ **{corner_reco['aggressivo']}**")
-
-                    if corner_reco.get("team_pick"):
-                        st.info(f"💡 Opzione Team Corner: **{corner_reco['team_pick']}**")
 
 # -----------------------------
 # TAB 2: TRADING STOP MANUALE
