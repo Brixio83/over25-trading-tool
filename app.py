@@ -1,20 +1,3 @@
-# app.py
-# Trading Tool PRO (Calcio) — Analisi + Trading (NO Bot)
-# ✅ Modalità 1: "Partite del giorno" (max 10) + ranking migliori giocate
-# ✅ Modalità 2: Inserimento manuale partita
-# ✅ Trading / Stop manuale
-# ✅ Champions League + Europa League (+ Conference opzionale)
-# ✅ Corner
-# ✅ NUOVO:
-#    - Mercati 1 / X / 2
-#    - Quote automatiche da API-Football
-#    - Preferenza NetBet, fallback automatico se non disponibile
-#    - Miglior giocata partita
-#    - Migliori giocate del giorno
-#
-# --- STREAMLIT SECRETS ---
-# API_FOOTBALL_KEY = "la_tua_key_api_football"
-
 from __future__ import annotations
 
 import math
@@ -153,8 +136,7 @@ def get_fixtures_in_range(
     if league_id:
         params["league"] = league_id
     data = http_get_json(url, api_football_headers(api_key), params)
-    resp = data.get("response", []) or []
-    return resp[:limit]
+    return (data.get("response", []) or [])[:limit]
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
@@ -169,10 +151,6 @@ def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[in
 
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def get_fixtures_by_date_and_league(api_key: str, day: str, league_id: int) -> List[Dict[str, Any]]:
-    """
-    day: YYYY-MM-DD
-    Usa la stagione calcolata dalla data scelta, non da now_utc()
-    """
     try:
         dt = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         season = season_for_date(dt)
@@ -182,13 +160,6 @@ def get_fixtures_by_date_and_league(api_key: str, day: str, league_id: int) -> L
     url = f"{API_FOOTBALL_BASE}/fixtures"
     params = {"date": day, "league": league_id, "season": season}
     data = http_get_json(url, api_football_headers(api_key), params)
-    return data.get("response", []) or []
-
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def get_odds_bookmakers(api_key: str) -> List[Dict[str, Any]]:
-    url = f"{API_FOOTBALL_BASE}/odds/bookmakers"
-    data = http_get_json(url, api_football_headers(api_key), {})
     return data.get("response", []) or []
 
 
@@ -235,24 +206,24 @@ def find_fixture_smart(
         if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
             continue
         if fixture_match_teams(fx, team_a_id, team_b_id):
-            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT del Team A.", season=season)
+            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT Team A.", season=season)
 
     fx_next_b = get_team_next_fixtures(api_key, team_b_id, season, nxt=25)
     for fx in fx_next_b:
         if league_id and (fx.get("league", {}) or {}).get("id") != league_id:
             continue
         if fixture_match_teams(fx, team_a_id, team_b_id):
-            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT del Team B.", season=season)
+            return FixturePick(fixture=fx, message="Fixture trovata tra le NEXT Team B.", season=season)
 
     return FixturePick(
         fixture=None,
-        message="Fixture non trovata (range + next). Analisi basata su ultimi match squadra (fallback).",
+        message="Fixture non trovata. Analisi in fallback sugli ultimi match.",
         season=season,
     )
 
 
 # =============================
-# ODDS PARSING
+# ODDS
 # =============================
 
 def normalize_bookmaker_name(name: str) -> str:
@@ -270,13 +241,12 @@ def normalize_value_label(v: str) -> str:
 def choose_bookmaker_from_odds(odds_response: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
     candidates = []
     for item in odds_response:
-        book = item.get("bookmaker", {}) or {}
-        name = book.get("name", "")
-        if name:
+        bookmaker = item.get("bookmaker", {}) or {}
+        if bookmaker.get("name"):
             candidates.append(item)
 
     if not candidates:
-        return None, "Nessun bookmaker disponibile"
+        return None, "Nessun bookmaker"
 
     for item in candidates:
         name = normalize_bookmaker_name((item.get("bookmaker", {}) or {}).get("name", ""))
@@ -310,7 +280,6 @@ def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[s
                     odd_f = float(odd)
                 except Exception:
                     continue
-
                 if label in {"home", "1"}:
                     out["1"] = odd_f
                 elif label in {"draw", "x"}:
@@ -326,7 +295,6 @@ def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[s
                     odd_f = float(odd)
                 except Exception:
                     continue
-
                 if label in {"home/draw", "1x"}:
                     out["1X"] = odd_f
                 elif label in {"draw/away", "x2"}:
@@ -360,7 +328,6 @@ def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[s
                     odd_f = float(odd)
                 except Exception:
                     continue
-
                 if label in {"yes", "y"}:
                     out["Goal (BTTS Sì)"] = odd_f
                 elif label in {"no", "n"}:
@@ -384,7 +351,7 @@ def _extract_corner_kicks(stats_for_team: Dict[str, Any]) -> Optional[int]:
     arr = stats_for_team.get("statistics", []) or []
     for item in arr:
         t = (item.get("type") or "").strip().lower()
-        if t in ["corner kicks", "corners", "corner kick"]:
+        if t in {"corner kicks", "corners", "corner kick"}:
             v = item.get("value")
             if v is None:
                 return None
@@ -490,31 +457,23 @@ def build_corner_recos(a_c: Dict[str, Any], b_c: Dict[str, Any], a_name: str, b_
 
     reasons = []
     if min_used < 6:
-        reasons.append("pochi dati corner (meno di 6 match con statistiche)")
+        reasons.append("pochi dati corner")
     if total_avg_expected < 7.0:
-        reasons.append("media corner totale bassa")
+        reasons.append("media corner bassa")
     if total_std_expected > 3.2:
-        reasons.append("corner molto variabili (rischio alto)")
+        reasons.append("corner molto variabili")
 
     no_bet = len(reasons) >= 2
 
-    line_prud = _nearest_corner_line(total_avg_expected - 1.2, lo=3.5, hi=12.5)
-    line_med = _nearest_corner_line(total_avg_expected - 0.3, lo=3.5, hi=12.5)
-    line_aggr = _nearest_corner_line(total_avg_expected + 0.9, lo=3.5, hi=12.5)
+    line_prud = _nearest_corner_line(total_avg_expected - 1.2)
+    line_med = _nearest_corner_line(total_avg_expected - 0.3)
+    line_aggr = _nearest_corner_line(total_avg_expected + 0.9)
 
-    low1 = _nearest_corner_line(total_avg_expected - 2.2, lo=3.5, hi=12.5)
-    low2 = _nearest_corner_line(total_avg_expected - 1.7, lo=3.5, hi=12.5)
-    low3 = _nearest_corner_line(total_avg_expected - 1.2, lo=3.5, hi=12.5)
+    low1 = _nearest_corner_line(total_avg_expected - 2.2)
+    low2 = _nearest_corner_line(total_avg_expected - 1.7)
+    low3 = _nearest_corner_line(total_avg_expected - 1.2)
 
     lows = sorted(list({low1, low2, low3, line_prud}), key=lambda x: x)
-
-    a_for = a_c.get("for_avg", 0.0)
-    b_for = b_c.get("for_avg", 0.0)
-    team_pick = None
-    if a_for >= 5.2 and a_for > b_for + 0.6:
-        team_pick = f"{a_name} Team Corners Over 4.5"
-    elif b_for >= 5.2 and b_for > a_for + 0.6:
-        team_pick = f"{b_name} Team Corners Over 4.5"
 
     return {
         "no_bet": no_bet,
@@ -526,22 +485,11 @@ def build_corner_recos(a_c: Dict[str, Any], b_c: Dict[str, Any], a_name: str, b_
         "medio": f"Over {line_med:.1f} Corner",
         "aggressivo": f"Over {line_aggr:.1f} Corner",
         "low_lines": [f"Over {x:.1f} Corner" for x in lows],
-        "team_pick": team_pick,
     }
 
 
-def parse_corner_line_value(label: str) -> Optional[float]:
-    try:
-        m = re.search(r"over\s+([0-9]+(?:\.[0-9])?)", label.strip().lower())
-        if not m:
-            return None
-        return float(m.group(1))
-    except Exception:
-        return None
-
-
 # =============================
-# ANALISI / FORMA
+# ANALISI
 # =============================
 
 def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[str, Any]:
@@ -604,8 +552,8 @@ def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[st
         "ga": ga,
         "avg_total_goals": avg_total_goals,
         "form": "".join(form[-5:]),
-        "totals": totals[-played:],
-        "btts": btts[-played:],
+        "totals": totals,
+        "btts": btts,
     }
 
 
@@ -615,13 +563,14 @@ def market_rates_from_summary(s: Dict[str, Any]) -> Dict[str, float]:
     n = len(totals)
     if n == 0:
         return {"o15": 0.0, "o25": 0.0, "o35": 0.0, "u35": 0.0, "u45": 0.0, "btts_yes": 0.0}
-    o15 = sum(1 for t in totals if t >= 2) / n
-    o25 = sum(1 for t in totals if t >= 3) / n
-    o35 = sum(1 for t in totals if t >= 4) / n
-    u35 = sum(1 for t in totals if t <= 3) / n
-    u45 = sum(1 for t in totals if t <= 4) / n
-    btts_yes = sum(1 for x in btts if x) / n
-    return {"o15": o15, "o25": o25, "o35": o35, "u35": u35, "u45": u45, "btts_yes": btts_yes}
+    return {
+        "o15": sum(1 for t in totals if t >= 2) / n,
+        "o25": sum(1 for t in totals if t >= 3) / n,
+        "o35": sum(1 for t in totals if t >= 4) / n,
+        "u35": sum(1 for t in totals if t <= 3) / n,
+        "u45": sum(1 for t in totals if t <= 4) / n,
+        "btts_yes": sum(1 for x in btts if x) / n,
+    }
 
 
 def combine_rates(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
@@ -673,18 +622,17 @@ def recommend_outright_1x2(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -
 
     probs = {"1": p1, "X": px, "2": p2}
     best_market = max(probs, key=probs.get)
-    best_prob = probs[best_market]
 
     if best_market == "1":
-        why = f"Casa leggermente favorita: indice forma migliore ({home_idx:.2f} vs {away_idx:.2f})."
+        why = f"Casa favorita: indice forma migliore ({home_idx:.2f} vs {away_idx:.2f})."
     elif best_market == "2":
-        why = f"Trasferta leggermente favorita: indice forma migliore ({away_idx:.2f} vs {home_idx:.2f})."
+        why = f"Trasferta favorita: indice forma migliore ({away_idx:.2f} vs {home_idx:.2f})."
     else:
-        why = f"Match equilibrato e abbastanza da pareggio: differenza forma ridotta ({abs(diff):.2f}) e media gol ≈ {avg_goals:.2f}."
+        why = f"Match equilibrato: differenza forma ridotta e media gol ≈ {avg_goals:.2f}."
 
     return {
         "market": best_market,
-        "prob": best_prob,
+        "prob": probs[best_market],
         "probs": probs,
         "why": why,
         "risk": label_risk(best_market),
@@ -698,42 +646,33 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
     avg_goals = (home_sum.get("avg_total_goals", 0.0) + away_sum.get("avg_total_goals", 0.0)) / 2.0
 
     if r["o25"] >= 0.62 and avg_goals >= 2.7:
-        primary = ("Over 2.5", f"Trend gol alto: Over 2.5 medio ≈ {r['o25']*100:.0f}% (ultimi match). Media gol ≈ {avg_goals:.2f}.")
-        alt = [
-            ("Under 4.5", f"Linea prudente: Under 4.5 ≈ {r['u45']*100:.0f}%."),
-            ("Over 3.5", f"Più aggressivo: Over 3.5 ≈ {r['o35']*100:.0f}%."),
-        ]
+        primary = ("Over 2.5", f"Trend gol alto: Over 2.5 ≈ {r['o25']*100:.0f}%.")
+        alt = [("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%."), ("Over 3.5", f"Over 3.5 ≈ {r['o35']*100:.0f}%.")]
     elif r["u35"] >= 0.70 and avg_goals <= 2.4:
-        primary = ("Under 3.5", f"Trend gol basso: Under 3.5 medio ≈ {r['u35']*100:.0f}%. Media gol ≈ {avg_goals:.2f}.")
-        alt = [
-            ("Over 1.5", f"Alternativa prudente: Over 1.5 ≈ {r['o15']*100:.0f}%."),
-            ("Under 4.5", f"Ancora più coperto: Under 4.5 ≈ {r['u45']*100:.0f}%."),
-        ]
+        primary = ("Under 3.5", f"Trend gol basso: Under 3.5 ≈ {r['u35']*100:.0f}%.")
+        alt = [("Over 1.5", f"Over 1.5 ≈ {r['o15']*100:.0f}%."), ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%.")]
     else:
-        primary = ("Over 1.5", f"Zona centrale: Over 1.5 ≈ {r['o15']*100:.0f}%. Media gol ≈ {avg_goals:.2f}.")
-        alt = [
-            ("Over 2.5", f"Se vuoi più quota: Over 2.5 ≈ {r['o25']*100:.0f}%."),
-            ("Under 4.5", f"Se vuoi più copertura: Under 4.5 ≈ {r['u45']*100:.0f}%."),
-        ]
+        primary = ("Over 1.5", f"Zona centrale: Over 1.5 ≈ {r['o15']*100:.0f}%.")
+        alt = [("Over 2.5", f"Over 2.5 ≈ {r['o25']*100:.0f}%."), ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%.")]
 
     btts_yes = r["btts_yes"]
     if btts_yes >= 0.62:
-        alt.append(("Goal (BTTS Sì)", f"BTTS Sì alto: ≈ {btts_yes*100:.0f}%."))
+        alt.append(("Goal (BTTS Sì)", f"BTTS Sì ≈ {btts_yes*100:.0f}%."))
     elif btts_yes <= 0.40:
-        alt.append(("No Goal (BTTS No)", f"BTTS basso: BTTS Sì ≈ {btts_yes*100:.0f}% → più coerente No Goal."))
+        alt.append(("No Goal (BTTS No)", f"No Goal più coerente."))
     else:
-        alt.append(("Goal/NoGoal", f"BTTS medio ≈ {btts_yes*100:.0f}% → decide meglio col LIVE."))
+        alt.append(("Goal/NoGoal", "Zona media, da leggere con attenzione."))
 
     ppg_h = home_sum.get("ppg", 0.0)
     ppg_a = away_sum.get("ppg", 0.0)
     diff = ppg_h - ppg_a
 
     if diff >= 0.55:
-        outcome = ("1X", f"Casa più in forma nei recenti: PPG {ppg_h:.2f} vs {ppg_a:.2f}.")
+        outcome = ("1X", f"Casa più in forma: PPG {ppg_h:.2f} vs {ppg_a:.2f}.")
     elif diff <= -0.55:
-        outcome = ("X2", f"Trasferta più in forma nei recenti: PPG {ppg_a:.2f} vs {ppg_h:.2f}.")
+        outcome = ("X2", f"Trasferta più in forma: PPG {ppg_a:.2f} vs {ppg_h:.2f}.")
     else:
-        outcome = ("12", f"PPG simili ({ppg_h:.2f} vs {ppg_a:.2f}): match aperto (no pareggio).")
+        outcome = ("12", f"PPG simili ({ppg_h:.2f} vs {ppg_a:.2f}).")
 
     outright = recommend_outright_1x2(home_sum, away_sum)
 
@@ -763,8 +702,7 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
 
 def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
     rates = rec["meta"]["rates"]
-    outright = rec.get("outright", {})
-    probs_1x2 = outright.get("probs", {"1": 0.0, "X": 0.0, "2": 0.0})
+    probs_1x2 = rec["outright"]["probs"]
 
     return {
         "1": probs_1x2.get("1", 0.0),
@@ -789,86 +727,57 @@ def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) ->
         odd = odds_map.get(market)
         if odd is None or odd <= 1.0:
             continue
-        value_idx = prob * odd
         rows.append({
             "market": market,
             "prob": prob,
             "odd": odd,
-            "value_idx": value_idx,
+            "value_idx": prob * odd,
             "risk": label_risk(market),
+            "source": "quota",
         })
     rows.sort(key=lambda x: x["value_idx"], reverse=True)
     return rows
 
 
-def pick_best_single_from_value_table(value_table: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def model_only_table(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    prob_map = market_probability_map(rec)
+    rows = []
+    for market, prob in prob_map.items():
+        rows.append({
+            "market": market,
+            "prob": prob,
+            "odd": None,
+            "value_idx": prob,
+            "risk": label_risk(market),
+            "source": "modello",
+        })
+    rows.sort(key=lambda x: x["value_idx"], reverse=True)
+    return rows
+
+
+def pick_best_single(value_table: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not value_table:
         return None
     return value_table[0]
 
 
-def pick_combo_suggestion(best_single: Optional[Dict[str, Any]], corner_reco: Dict[str, Any]) -> Dict[str, Any]:
-    if not best_single:
-        return {
-            "ok": False,
-            "legs": [],
-            "why": ["Nessuna singola disponibile con quote bookmaker."],
-            "corner_lines": [],
-        }
-
-    if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
-        return {
-            "ok": False,
-            "legs": [],
-            "why": ["Corner non disponibili per questo match."],
-            "corner_lines": [],
-        }
-
-    if corner_reco.get("no_bet"):
-        return {
-            "ok": False,
-            "legs": [],
-            "why": ["Corner: meglio NON forzare (dati pochi o troppo variabili)."] + corner_reco.get("no_bet_reasons", []),
-            "corner_lines": corner_reco.get("low_lines", []),
-        }
-
-    lows = corner_reco.get("low_lines", []) or []
-    if not lows:
-        lows = [corner_reco.get("prudente", "Over 6.5 Corner")]
-
-    best_line = None
-    best_val = None
-    for lab in lows:
-        v = parse_corner_line_value(lab)
-        if v is None:
-            continue
-        if best_val is None or v < best_val:
-            best_val = v
-            best_line = lab
-    best_line = best_line or lows[0]
-
-    why = []
-    why.append(f"Base: **{best_single['market']}** (miglior valore quota/probabilità).")
-    why.append("Corner: uso una linea bassa per tenere la combinata più prudente.")
-
-    return {
-        "ok": True,
-        "legs": [best_single["market"], best_line],
-        "why": why,
-        "corner_lines": lows,
-    }
-
-
-def signal_badge(x: float) -> str:
-    if x >= 1.18:
-        return "🔵 Valore molto alto"
-    if x >= 1.05:
-        return "🟣 Valore buono"
-    return "🟠 Valore basso"
+def signal_badge(x: float, source: str) -> str:
+    if source == "quota":
+        if x >= 1.18:
+            return "🔵 Valore molto alto"
+        if x >= 1.05:
+            return "🟣 Valore buono"
+        return "🟠 Valore basso"
+    else:
+        if x >= 0.72:
+            return "🔵 Forte dal modello"
+        if x >= 0.60:
+            return "🟣 Buona dal modello"
+        return "🟠 Debole dal modello"
 
 
 # =============================
-# HELPERS UI
+# PIPELINE MATCH
 # =============================
 
 def fixture_label(fx: Dict[str, Any]) -> str:
@@ -904,12 +813,13 @@ def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Opt
 
     rec = recommend_for_match(home_sum, away_sum)
 
-    a_corner = compute_team_corner_profile(api_key, int(home_id), season, last_n=10)
-    b_corner = compute_team_corner_profile(api_key, int(away_id), season, last_n=10)
+    a_corner = compute_team_corner_profile(api_key, home_id, season, last_n=10)
+    b_corner = compute_team_corner_profile(api_key, away_id, season, last_n=10)
     corner_reco = build_corner_recos(a_corner, b_corner, home_name, away_name)
 
-    odds_map = {}
-    bookmaker_used = "N/D"
+    bookmaker_used = "Nessuna quota"
+    odds_map: Dict[str, float] = {}
+
     if pick.fixture:
         fixture_id = (pick.fixture.get("fixture", {}) or {}).get("id")
         if fixture_id:
@@ -919,9 +829,12 @@ def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Opt
                 odds_map = extract_market_odds_from_bookmaker(bookmaker_item)
 
     prob_map = market_probability_map(rec)
-    value_table = build_value_table(prob_map, odds_map)
-    best_single = pick_best_single_from_value_table(value_table)
-    combo_pick = pick_combo_suggestion(best_single, corner_reco)
+    if odds_map:
+        value_table = build_value_table(prob_map, odds_map)
+    else:
+        value_table = model_only_table(rec)
+
+    best_single = pick_best_single(value_table)
 
     return {
         "pick": pick,
@@ -933,14 +846,11 @@ def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Opt
         "home_name": home_name,
         "away_name": away_name,
         "league_id": league_id,
-        "corner_a": a_corner,
-        "corner_b": b_corner,
         "corner_reco": corner_reco,
         "odds_map": odds_map,
         "bookmaker_used": bookmaker_used,
         "value_table": value_table,
         "best_single": best_single,
-        "combo_pick": combo_pick,
     }
 
 
@@ -970,13 +880,7 @@ def lay_stake_for_target_loss_when_lose(back_stake: float, target_loss: float) -
     return max(0.0, back_stake - target_loss)
 
 
-def lay_odds_needed_for_min_profit_if_win(
-    back_stake: float,
-    back_odds: float,
-    lay_stake_: float,
-    min_profit_win: float,
-    comm: float,
-) -> Optional[float]:
+def lay_odds_needed_for_min_profit_if_win(back_stake: float, back_odds: float, lay_stake_: float, min_profit_win: float, comm: float) -> Optional[float]:
     if lay_stake_ <= 0:
         return None
     gross_target = min_profit_win / max(1e-9, (1.0 - comm))
@@ -987,32 +891,16 @@ def lay_odds_needed_for_min_profit_if_win(
     return max_lay_odds
 
 
-def make_stop_plan(
-    back_stake: float,
-    back_odds: float,
-    comm_pct: float,
-    max_loss_if_lose: float,
-    min_profit_if_win: float,
-    stop_steps: List[int],
-) -> List[Dict[str, Any]]:
+def make_stop_plan(back_stake: float, back_odds: float, comm_pct: float, max_loss_if_lose: float, min_profit_if_win: float, stop_steps: List[int]) -> List[Dict[str, Any]]:
     comm = comm_pct / 100.0
     plan = []
 
     for s in stop_steps:
         quota_stop = back_odds * (1.0 + s / 100.0)
-
         lay_stake_ = lay_stake_for_target_loss_when_lose(back_stake, max_loss_if_lose)
+
         if lay_stake_ <= 0:
-            plan.append(
-                {
-                    "Stop": f"+{s}%",
-                    "Quota stop": round(quota_stop, 2),
-                    "Banca consigliata": "—",
-                    "Esito se VINCI": "—",
-                    "Esito se PERDI": "—",
-                    "Note": "Impossibile (perdita max troppo bassa rispetto alla puntata).",
-                }
-            )
+            plan.append({"Stop": f"+{s}%", "Quota stop": round(quota_stop, 2), "Banca consigliata": "—", "Esito se VINCI": "—", "Esito se PERDI": "—", "Note": "Impossibile"})
             continue
 
         win_pnl = pnl_if_win(back_stake, back_odds, lay_stake_, quota_stop, comm)
@@ -1020,44 +908,20 @@ def make_stop_plan(
 
         if win_pnl < min_profit_if_win - 1e-9:
             max_lay = lay_odds_needed_for_min_profit_if_win(back_stake, back_odds, lay_stake_, min_profit_if_win, comm)
-            note = "Impossibile (profitto minimo troppo alto o stop troppo aggressivo)."
+            note = "Profitto minimo troppo alto."
             if max_lay:
-                note += f" Prova quota stop ≤ {max_lay:.2f} oppure abbassa profitto minimo."
-            plan.append(
-                {
-                    "Stop": f"+{s}%",
-                    "Quota stop": round(quota_stop, 2),
-                    "Banca consigliata": "—",
-                    "Esito se VINCI": "—",
-                    "Esito se PERDI": "—",
-                    "Note": note,
-                }
-            )
+                note += f" Prova quota stop ≤ {max_lay:.2f}"
+            plan.append({"Stop": f"+{s}%", "Quota stop": round(quota_stop, 2), "Banca consigliata": "—", "Esito se VINCI": "—", "Esito se PERDI": "—", "Note": note})
             continue
 
-        if lose_pnl < -max_loss_if_lose - 1e-9:
-            plan.append(
-                {
-                    "Stop": f"+{s}%",
-                    "Quota stop": round(quota_stop, 2),
-                    "Banca consigliata": "—",
-                    "Esito se VINCI": "—",
-                    "Esito se PERDI": "—",
-                    "Note": "Impossibile (perdita se perdi oltre max).",
-                }
-            )
-            continue
-
-        plan.append(
-            {
-                "Stop": f"+{s}%",
-                "Quota stop": round(quota_stop, 2),
-                "Banca consigliata": f"{lay_stake_:.2f} €",
-                "Esito se VINCI": f"{win_pnl:+.2f} €",
-                "Esito se PERDI": f"{lose_pnl:+.2f} €",
-                "Note": "OK",
-            }
-        )
+        plan.append({
+            "Stop": f"+{s}%",
+            "Quota stop": round(quota_stop, 2),
+            "Banca consigliata": f"{lay_stake_:.2f} €",
+            "Esito se VINCI": f"{win_pnl:+.2f} €",
+            "Esito se PERDI": f"{lose_pnl:+.2f} €",
+            "Note": "OK",
+        })
 
     return plan
 
@@ -1072,7 +936,6 @@ st.markdown(
     """
 <style>
 .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-h1, h2, h3 { letter-spacing: -0.02em; }
 .small-muted { opacity: 0.75; font-size: 0.92rem; }
 .card {
   border: 1px solid rgba(255,255,255,0.08);
@@ -1096,7 +959,7 @@ h1, h2, h3 { letter-spacing: -0.02em; }
 )
 
 st.title("⚽ Trading Tool PRO (Calcio) — Analisi + Quote + Value")
-st.caption("Analisi basata su dati recenti + quote bookmaker. Non è una previsione certa.")
+st.caption("Analisi su dati recenti e quote bookmaker. Non è una previsione certa.")
 
 secrets_keys = dict(st.secrets) if hasattr(st, "secrets") else {}
 api_football_key = secrets_keys.get("API_FOOTBALL_KEY", "")
@@ -1109,7 +972,7 @@ with st.expander("🔧 DEBUG (solo se serve)", expanded=False):
         st.warning("API_FOOTBALL_KEY NON trovata nei Secrets.")
 
 if not api_football_key:
-    st.error("Manca API_FOOTBALL_KEY nei Secrets (Streamlit → Settings → Secrets).")
+    st.error("Manca API_FOOTBALL_KEY nei Secrets.")
     st.stop()
 
 tabs = st.tabs(["📊 Analisi partita (PRO)", "🧮 Trading / Stop (Manuale)"])
@@ -1126,173 +989,101 @@ def render_analysis(res: Dict[str, Any]):
     an = res["away_name"]
     corner_reco = res.get("corner_reco")
     best_single = res.get("best_single")
-    combo_pick = res.get("combo_pick")
     value_table = res.get("value_table", [])
     bookmaker_used = res.get("bookmaker_used", "N/D")
     odds_map = res.get("odds_map", {})
 
     st.success("✅ Analisi pronta")
 
-    if pick.fixture:
-        fx = pick.fixture
-        fx_date = ((fx.get("fixture", {}) or {}).get("date")) or ""
-        league = fx.get("league", {}) or {}
-        st.markdown(
-            f"""
+    st.markdown(
+        f"""
 <div class="card">
 <b>{hn} vs {an}</b><br/>
-<span class="small-muted">Fixture: {fx_date} | League: {league.get("name","?")} (ID {league.get("id","?")}) | Stagione: {pick.season}/{pick.season+1}</span><br/>
 <span class="small-muted">{pick.message}</span><br/>
-<span class="small-muted"><b>Bookmaker quote usato:</b> {bookmaker_used}</span>
+<span class="small-muted"><b>Bookmaker:</b> {bookmaker_used}</span>
 </div>
 """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            f"""
-<div class="card">
-<b>{hn} vs {an}</b><br/>
-<span class="small-muted">Stagione stimata: {pick.season}/{pick.season+1}</span><br/>
-<span class="small-muted">{pick.message}</span><br/>
-<span class="small-muted"><b>Bookmaker quote usato:</b> {bookmaker_used}</span>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
+        unsafe_allow_html=True,
+    )
 
-    c1, c2 = st.columns(2, gap="large")
-
-    def team_block(title: str, s: Dict[str, Any], inj_count: int):
-        stars = "★" * min(5, max(1, int(round(clamp(s["ppg"], 0.0, 3.0) / 0.6))))
-        st.markdown(f"### {title}")
-        st.write(f"- Forma (ultimi {s['matches']}): **{stars}**  ({s['form']})")
-        st.write(f"- PPG: **{s['ppg']:.2f}**  |  Punti: **{s['points']}**")
-        st.write(f"- Gol fatti/subiti: **{s['gf']} / {s['ga']}**")
-        st.write(f"- Media gol totali: **{s['avg_total_goals']:.2f}**")
-        st.write(f"- Infortuni/Squalifiche (eventi API): **{inj_count}**")
+    c1, c2 = st.columns(2)
 
     with c1:
-        team_block(f"🏠 {hn}", home_sum, len(inj_home))
+        st.markdown(f"### 🏠 {hn}")
+        st.write(f"- Forma: **{home_sum['form']}**")
+        st.write(f"- PPG: **{home_sum['ppg']:.2f}**")
+        st.write(f"- Gol fatti/subiti: **{home_sum['gf']} / {home_sum['ga']}**")
+        st.write(f"- Infortuni/Squalifiche: **{len(inj_home)}**")
+
     with c2:
-        team_block(f"✈️ {an}", away_sum, len(inj_away))
+        st.markdown(f"### ✈️ {an}")
+        st.write(f"- Forma: **{away_sum['form']}**")
+        st.write(f"- PPG: **{away_sum['ppg']:.2f}**")
+        st.write(f"- Gol fatti/subiti: **{away_sum['gf']} / {away_sum['ga']}**")
+        st.write(f"- Infortuni/Squalifiche: **{len(inj_away)}**")
 
     st.markdown("---")
     st.markdown("## 🎯 Miglior giocata della partita")
 
     if best_single:
+        source = best_single.get("source", "modello")
+        idx_label = "Indice valore" if source == "quota" else "Forza modello"
+        odd_text = f" @ {best_single['odd']:.2f}" if best_single.get("odd") else ""
         st.markdown(
             f"""
 <div class="card">
 <b>✅ Miglior giocata:</b> <span class="badge">{best_single['risk']}</span><br/>
-<h3 style="margin-top:8px;margin-bottom:8px;">{best_single['market']} @ {best_single['odd']:.2f}</h3>
-<span class="small-muted"><b>Probabilità stimata:</b> {best_single['prob']*100:.0f}% · <b>Indice valore:</b> {best_single['value_idx']:.2f} · {signal_badge(float(best_single['value_idx']))}</span>
+<h3>{best_single['market']}{odd_text}</h3>
+<span class="small-muted"><b>Probabilità:</b> {best_single['prob']*100:.0f}% · <b>{idx_label}:</b> {best_single['value_idx']:.2f} · {signal_badge(float(best_single['value_idx']), source)}</span><br/>
+<span class="small-muted"><b>Origine:</b> {source}</span>
 </div>
 """,
             unsafe_allow_html=True,
         )
-    else:
-        st.warning("Nessuna quota utile trovata per costruire la miglior giocata automatica.")
 
-    st.markdown("## 1️⃣X️⃣2️⃣ Esito secco")
-    outright = rec.get("outright", {})
-    probs_1x2 = outright.get("probs", {"1": 0.0, "X": 0.0, "2": 0.0})
+    st.markdown("## 1️⃣X️⃣2️⃣")
+    probs_1x2 = rec["outright"]["probs"]
+    k1, kx, k2 = st.columns(3)
+    with k1:
+        st.metric("1", f"{probs_1x2['1']*100:.0f}%")
+    with kx:
+        st.metric("X", f"{probs_1x2['X']*100:.0f}%")
+    with k2:
+        st.metric("2", f"{probs_1x2['2']*100:.0f}%")
 
-    c_1x2a, c_1x2b, c_1x2c = st.columns(3)
-    with c_1x2a:
-        st.metric("1", f"{probs_1x2.get('1', 0.0)*100:.0f}%")
-    with c_1x2b:
-        st.metric("X", f"{probs_1x2.get('X', 0.0)*100:.0f}%")
-    with c_1x2c:
-        st.metric("2", f"{probs_1x2.get('2', 0.0)*100:.0f}%")
-
-    st.caption(f"Scelta 1X2 del modello: {outright.get('market', '-')} — {outright.get('why', '')}")
-
-    st.markdown("---")
-    st.markdown("## 💰 Quote bookmaker trovate")
     if odds_map:
-        odds_rows = [{"Mercato": k, "Quota": v} for k, v in odds_map.items()]
-        st.dataframe(odds_rows, use_container_width=True)
-    else:
-        st.info("Nessuna quota disponibile da API per questo match.")
+        st.markdown("## 💰 Quote trovate")
+        st.dataframe([{"Mercato": k, "Quota": v} for k, v in odds_map.items()], use_container_width=True)
 
-    st.markdown("## 📈 Classifica mercati della partita")
+    st.markdown("## 📈 Classifica mercati")
     if value_table:
         rows = []
         for r in value_table[:10]:
             rows.append({
                 "Mercato": r["market"],
                 "Probabilità": f"{r['prob']*100:.0f}%",
-                "Quota": f"{r['odd']:.2f}",
-                "Indice valore": f"{r['value_idx']:.2f}",
+                "Quota": "-" if r.get("odd") is None else f"{r['odd']:.2f}",
+                "Indice": f"{r['value_idx']:.2f}",
+                "Origine": r["source"],
                 "Rischio": r["risk"],
             })
         st.dataframe(rows, use_container_width=True)
-    else:
-        st.info("Nessun mercato quotato disponibile per costruire la classifica value.")
 
-    if combo_pick:
-        st.markdown("## ➕ Combinata opzionale")
-        if combo_pick.get("ok"):
-            legs = combo_pick["legs"]
-            st.markdown(
-                f"""
-<div class="card">
-<h3 style="margin-top:8px;margin-bottom:8px;">{legs[0]} + {legs[1]}</h3>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-            for r in combo_pick.get("why", []):
-                st.write(f"- {r}")
-        else:
-            for r in combo_pick.get("why", []):
-                st.write(f"- {r}")
-
-    st.markdown("---")
     st.markdown("## 🎯 Corner")
-    st.caption("Sezione separata: più rischio. Se l’API non dà corner, lo diciamo chiaramente.")
-
     if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
-        st.info("Corner: dati non disponibili su questi match (dipende dall’API/piano).")
+        st.info("Corner non disponibili.")
     else:
         if corner_reco.get("no_bet"):
-            st.warning("⚠️ Corner: meglio NON forzare (NO BET).")
-            for r in corner_reco.get("no_bet_reasons", []):
-                st.write(f"- {r}")
+            st.warning("Corner: meglio non forzare.")
         else:
-            st.markdown(
-                f"""
-<div class="card">
-<b>Corner — numeri stimati</b><br/>
-<span class="small-muted">Media corner attesa: <b>{corner_reco['expected_total_avg']:.2f}</b> · Variabilità: <b>{corner_reco['expected_total_std']:.2f}</b> · Trend ultimi 5 vs 10: <b>{corner_reco['expected_trend']:+.2f}</b></span>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-            cc1, cc2, cc3 = st.columns(3)
-            with cc1:
-                st.markdown("### 🛡️ Prudente")
-                st.write(f"✅ **{corner_reco['prudente']}**")
-            with cc2:
-                st.markdown("### ⚖️ Medio")
-                st.write(f"✅ **{corner_reco['medio']}**")
-            with cc3:
-                st.markdown("### 🔥 Aggressivo")
-                st.write(f"✅ **{corner_reco['aggressivo']}**")
-
-            lows = corner_reco.get("low_lines", []) or []
+            st.write(f"Prudente: **{corner_reco['prudente']}**")
+            st.write(f"Medio: **{corner_reco['medio']}**")
+            st.write(f"Aggressivo: **{corner_reco['aggressivo']}**")
+            lows = corner_reco.get("low_lines", [])
             if lows:
-                st.markdown("**Linee corner più basse (più facili):**")
-                st.write(" · ".join(lows[:6]))
-
-            if corner_reco.get("team_pick"):
-                st.info(f"💡 Opzione Team Corner: **{corner_reco['team_pick']}**")
+                st.write("Linee basse:", " · ".join(lows[:6]))
 
 
-# -----------------------------
-# TAB 1: ANALISI PRO
-# -----------------------------
 with tabs[0]:
     st.subheader("📊 Analisi partita (PRO)")
 
@@ -1300,48 +1091,36 @@ with tabs[0]:
 
     with mode_tabs[0]:
         st.markdown("### 🗓️ Partite del giorno")
-        st.caption("Include anche Champions League ed Europa League (se ci sono match quel giorno).")
 
-        cA, cB, cC = st.columns([2, 1, 1], gap="large")
+        cA, cB, cC = st.columns([2, 1, 1])
         with cA:
             selected_leagues = st.multiselect(
                 "Campionati da includere",
                 options=list(DEFAULT_LEAGUES.keys()),
-                default=st.session_state.get(
-                    "selected_leagues",
-                    ["Premier League (ENG)", "Serie A (ITA)", "Bundesliga (GER)", "LaLiga (ESP)", "Ligue 1 (FRA)", "Champions League", "Europa League"],
-                ),
+                default=[],
             )
         with cB:
-            d_today = datetime.now().date()
-            day_pick = st.date_input("Giorno", value=st.session_state.get("day_pick", d_today))
+            day_pick = st.date_input("Giorno", value=datetime.now().date())
         with cC:
-            max_out = st.number_input("Max partite", min_value=3, max_value=20, value=int(st.session_state.get("max_out", 10)), step=1)
-
-        st.session_state["selected_leagues"] = selected_leagues
-        st.session_state["day_pick"] = day_pick
-        st.session_state["max_out"] = int(max_out)
+            max_out = st.number_input("Max partite", min_value=3, max_value=20, value=10, step=1)
 
         if st.button("🔄 Trova partite", type="primary", use_container_width=True):
             if not selected_leagues:
                 st.warning("Seleziona almeno un campionato.")
             else:
-                with st.spinner("Carico le partite e preparo la short-list..."):
+                with st.spinner("Cerco partite..."):
                     day_str = day_pick.isoformat()
-
                     all_fx: List[Dict[str, Any]] = []
                     debug_counts = []
 
                     for lname in selected_leagues:
                         lid = DEFAULT_LEAGUES[lname]
                         fx = get_fixtures_by_date_and_league(api_football_key, day_str, lid)
-
                         debug_counts.append({
                             "lega": lname,
                             "league_id": lid,
                             "trovate_api": len(fx),
                         })
-
                         for f in fx:
                             status = (((f.get("fixture", {}) or {}).get("status", {}) or {}).get("short")) or ""
                             if status in {"FT", "AET", "PEN", "CANC", "PST", "ABD"}:
@@ -1350,10 +1129,9 @@ with tabs[0]:
 
                     st.session_state["debug_counts"] = debug_counts
 
-                    all_fx = all_fx[:40]
                     ranked: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
 
-                    for fx in all_fx:
+                    for fx in all_fx[:40]:
                         teams = fx.get("teams", {}) or {}
                         league = fx.get("league", {}) or {}
 
@@ -1377,15 +1155,10 @@ with tabs[0]:
                         if not best_single:
                             continue
 
-                        score = float(best_single["value_idx"])
-                        ranked.append((score, fx, result))
+                        ranked.append((float(best_single["value_idx"]), fx, result))
 
                     ranked.sort(key=lambda x: x[0], reverse=True)
-
-                    st.session_state["day_ranked"] = ranked[: int(max_out)]
-                    st.session_state["day_choice_idx"] = 0
-                    st.session_state["last_analysis_result"] = None
-                    st.session_state["last_analysis_source"] = None
+                    st.session_state["day_ranked"] = ranked[:int(max_out)]
 
         dbg = st.session_state.get("debug_counts", [])
         if dbg:
@@ -1394,64 +1167,52 @@ with tabs[0]:
 
         ranked = st.session_state.get("day_ranked", [])
 
-        if not ranked:
-            st.info("Seleziona campionati e premi **Trova partite**.")
-        else:
+        if ranked:
             st.markdown("## ⭐ Migliori giocate del giorno")
             rows_rank = []
-            for score, fx, result in ranked[: int(max_out)]:
+            for score, fx, result in ranked:
                 teams = fx.get("teams", {}) or {}
                 home = (teams.get("home", {}) or {}).get("name", "Home")
                 away = (teams.get("away", {}) or {}).get("name", "Away")
-                best_single = result.get("best_single", {})
+                best = result.get("best_single", {})
                 rows_rank.append({
                     "Partita": f"{home} - {away}",
-                    "Giocata consigliata": best_single.get("market", "-"),
-                    "Quota": f"{best_single.get('odd', 0.0):.2f}" if best_single else "-",
-                    "Probabilità": f"{best_single.get('prob', 0.0)*100:.0f}%" if best_single else "-",
-                    "Indice valore": f"{score:.2f}",
+                    "Giocata": best.get("market", "-"),
+                    "Quota": "-" if best.get("odd") is None else f"{best.get('odd'):.2f}",
+                    "Prob.": f"{best.get('prob', 0.0)*100:.0f}%",
+                    "Indice": f"{score:.2f}",
+                    "Origine": best.get("source", "-"),
                     "Bookmaker": result.get("bookmaker_used", "N/D"),
-                    "Rischio": best_single.get("risk", "-"),
                 })
             st.dataframe(rows_rank, use_container_width=True)
 
             labels = [fixture_label(fx) for _, fx, _ in ranked]
-            idx = int(st.session_state.get("day_choice_idx", 0))
-            idx = max(0, min(idx, len(labels) - 1))
-            choice = st.selectbox("Seleziona una partita per vedere il dettaglio", labels, index=idx)
-            st.session_state["day_choice_idx"] = labels.index(choice)
-
-            _, _, res_selected = ranked[st.session_state["day_choice_idx"]]
-
-            if st.button("🔎 Apri dettaglio partita", use_container_width=True):
-                st.session_state["last_analysis_result"] = res_selected
-                st.session_state["last_analysis_source"] = "day"
-
-            res = st.session_state.get("last_analysis_result")
-            if res and st.session_state.get("last_analysis_source") == "day":
-                render_analysis(res)
+            selected_label = st.selectbox("Apri dettaglio partita", labels)
+            idx = labels.index(selected_label)
+            _, _, res_selected = ranked[idx]
+            render_analysis(res_selected)
+        else:
+            st.info("Seleziona campionati e premi Trova partite.")
 
     with mode_tabs[1]:
         st.markdown("### ✍️ Inserisci partita manualmente")
 
-        colA, colB = st.columns([2, 1], gap="large")
+        colA, colB = st.columns([2, 1])
         with colA:
-            match_text = st.text_input("Partita", value=st.session_state.get("match_text", ""), placeholder="Es: AC Milan - Como")
+            match_text = st.text_input("Partita", placeholder="Es: AC Milan - Como")
         with colB:
             league_label = st.selectbox("Campionato (consigliato)", options=["Auto"] + list(DEFAULT_LEAGUES.keys()), index=0)
             league_id = None if league_label == "Auto" else DEFAULT_LEAGUES[league_label]
 
-        st.session_state["match_text"] = match_text
-
         if st.button("🔎 Analizza (manuale)", type="primary", use_container_width=True):
             parsed = parse_match_input(match_text)
             if not parsed:
-                st.error("Scrivi la partita tipo: 'Juve - Atalanta' oppure 'Juve-Atalanta'.")
+                st.error("Scrivi la partita tipo: 'Juve - Atalanta'.")
                 st.stop()
 
             home_name_in, away_name_in = parsed
 
-            with st.spinner("Cerco squadre su API-FOOTBALL..."):
+            with st.spinner("Cerco squadre..."):
                 home_candidates = search_team(api_football_key, home_name_in)
                 away_candidates = search_team(api_football_key, away_name_in)
 
@@ -1495,59 +1256,31 @@ with tabs[0]:
             with st.spinner("Analizzo..."):
                 result = analyze_by_team_ids(api_football_key, int(home_id), int(away_id), league_id, home_real, away_real)
 
-            st.session_state["last_analysis_result"] = result
-            st.session_state["last_analysis_source"] = "manual"
-
-        res = st.session_state.get("last_analysis_result")
-        if res and st.session_state.get("last_analysis_source") == "manual":
-            render_analysis(res)
+            render_analysis(result)
 
 
-# -----------------------------
-# TAB 2: TRADING STOP MANUALE
-# -----------------------------
 with tabs[1]:
     st.subheader("🧮 Trading / Stop (Manuale)")
-    st.caption("Qui inserisci TU quote e importi reali (Betflag/Exchange). Nessuna API necessaria.")
+    st.caption("Qui inserisci tu quote e importi reali.")
 
-    col1, col2 = st.columns(2, gap="large")
-
+    col1, col2 = st.columns(2)
     with col1:
-        back_stake = st.number_input("Puntata d’ingresso (€)", min_value=1.0, value=float(st.session_state.get("back_stake", 10.0)), step=1.0)
-        comm_pct = st.number_input("Commissione exchange (%)", min_value=0.0, max_value=20.0, value=float(st.session_state.get("comm_pct", 5.0)), step=0.5)
+        back_stake = st.number_input("Puntata d’ingresso (€)", min_value=1.0, value=10.0, step=1.0)
+        comm_pct = st.number_input("Commissione exchange (%)", min_value=0.0, max_value=20.0, value=5.0, step=0.5)
     with col2:
-        back_odds = st.number_input("Quota d’ingresso (reale)", min_value=1.01, value=float(st.session_state.get("back_odds", 1.80)), step=0.01, format="%.2f")
+        back_odds = st.number_input("Quota d’ingresso", min_value=1.01, value=1.80, step=0.01, format="%.2f")
         market_label = st.selectbox(
-            "Che cosa stai giocando?",
+            "Mercato",
             options=["Over 1.5", "Over 2.5", "Over 3.5", "Over 4.5", "Under 3.5", "Under 4.5", "Over 5.5", "Under 5.5", "Goal", "No Goal"],
             index=0,
         )
 
-    st.session_state["back_stake"] = back_stake
-    st.session_state["back_odds"] = back_odds
-    st.session_state["comm_pct"] = comm_pct
-
-    max_loss_if_lose = st.number_input("Perdita max se PERDI (€)", min_value=0.0, value=float(st.session_state.get("max_loss", 5.0)), step=0.5)
-    min_profit_if_win = st.number_input("Profitto minimo se VINCI (€)", min_value=0.0, value=float(st.session_state.get("min_profit", 1.0)), step=0.5)
-
-    st.session_state["max_loss"] = max_loss_if_lose
-    st.session_state["min_profit"] = min_profit_if_win
-
-    st.markdown(
-        """
-<div class="card">
-<b>📌 Nota importante</b><br/>
-Il calcolo della bancata è uguale per Over e Under: stai facendo <i>BACK</i> e poi <i>LAY</i> sullo stesso mercato.<br/>
-<b>STOP:</b> lo usi quando la quota <b>SALE</b> (ti va contro).
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    max_loss_if_lose = st.number_input("Perdita max se perdi (€)", min_value=0.0, value=5.0, step=0.5)
+    min_profit_if_win = st.number_input("Profitto minimo se vinci (€)", min_value=0.0, value=1.0, step=0.5)
 
     stop_steps = [25, 35, 50]
-    st.markdown("## 🛑 Quote STOP pronte")
 
-    if st.button("✅ CALCOLA (aggiorna risultati)", type="primary", use_container_width=True):
+    if st.button("✅ CALCOLA", type="primary", use_container_width=True):
         plan = make_stop_plan(
             back_stake=back_stake,
             back_odds=back_odds,
@@ -1558,15 +1291,13 @@ Il calcolo della bancata è uguale per Over e Under: stai facendo <i>BACK</i> e 
         )
         st.dataframe(plan, use_container_width=True)
 
-        st.markdown("## 🚪 Uscita adesso (se sei già LIVE)")
-        live_odds = st.number_input("Quota LIVE attuale (LAY odds)", min_value=1.01, value=float(st.session_state.get("live_odds", back_odds)), step=0.01, format="%.2f")
-        st.session_state["live_odds"] = live_odds
+        live_odds = st.number_input("Quota LIVE attuale (LAY)", min_value=1.01, value=back_odds, step=0.01, format="%.2f")
 
         comm = comm_pct / 100.0
         lay_stake_ = lay_stake_for_target_loss_when_lose(back_stake, max_loss_if_lose)
 
         if lay_stake_ <= 0:
-            st.warning("Perdita max troppo bassa rispetto alla puntata: non c’è una bancata che limiti la perdita come vuoi.")
+            st.warning("Perdita max troppo bassa rispetto alla puntata.")
         else:
             win_p = pnl_if_win(back_stake, back_odds, lay_stake_, live_odds, comm)
             lose_p = pnl_if_lose(back_stake, lay_stake_, comm)
@@ -1576,15 +1307,14 @@ Il calcolo della bancata è uguale per Over e Under: stai facendo <i>BACK</i> e 
                 f"""
 <div class="card">
 <b>{market_label}</b><br/>
-<b>BANCA consigliata adesso:</b> {lay_stake_:.2f} € @ {live_odds:.2f}<br/>
-<b>Liability (rischio):</b> {liab:.2f} €<br/><br/>
+<b>Banca consigliata adesso:</b> {lay_stake_:.2f} € @ {live_odds:.2f}<br/>
+<b>Liability:</b> {liab:.2f} €<br/><br/>
 <b>Esiti stimati:</b><br/>
 - Se VINCI: <b>{win_p:+.2f} €</b><br/>
-- Se PERDI: <b>{lose_p:+.2f} €</b><br/>
-<span class="small-muted">Stima semplificata: commissione applicata solo su profitto positivo.</span>
+- Se PERDI: <b>{lose_p:+.2f} €</b>
 </div>
 """,
                 unsafe_allow_html=True,
             )
     else:
-        st.info("Imposta i valori e premi **CALCOLA**.")
+        st.info("Imposta i valori e premi CALCOLA.")
