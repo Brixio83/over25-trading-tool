@@ -31,7 +31,6 @@ DEFAULT_LEAGUES: Dict[str, int] = {
     "Conference League": 848,
 }
 
-# sport keys The Odds API
 ODDS_SPORT_KEYS: Dict[int, str] = {
     135: "soccer_italy_serie_a",
     136: "soccer_italy_serie_b",
@@ -81,7 +80,17 @@ def norm_text(s: str) -> str:
     s = re.sub(r"[^a-z0-9\s\-]", " ", s)
     s = re.sub(r"\b(fc|cf|ac|afc|calcio|club|football club|sv|sc|ss|ssc)\b", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    return s
+
+    aliases = {
+        "inter milan": "inter",
+        "ac milan": "milan",
+        "man city": "manchester city",
+        "man utd": "manchester united",
+        "st pauli": "fc st pauli",
+        "bayern munich": "bayern munchen",
+        "psg": "paris saint germain",
+    }
+    return aliases.get(s, s)
 
 
 def similarity(a: str, b: str) -> float:
@@ -243,10 +252,6 @@ def find_fixture_smart(
 # THE ODDS API
 # =========================================================
 
-def odds_api_headers() -> Dict[str, str]:
-    return {}
-
-
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def get_the_odds_api_events(
     odds_api_key: str,
@@ -257,9 +262,6 @@ def get_the_odds_api_events(
     odds_format: str = "decimal",
     date_format: str = "iso",
 ) -> List[Dict[str, Any]]:
-    """
-    Scarica gli eventi con quote per uno sport The Odds API.
-    """
     url = f"{THE_ODDS_API_BASE}/sports/{sport_key}/odds"
     params = {
         "apiKey": odds_api_key,
@@ -268,20 +270,21 @@ def get_the_odds_api_events(
         "oddsFormat": odds_format,
         "dateFormat": date_format,
     }
-    r = requests.get(url, headers=odds_api_headers(), params=params, timeout=20)
-    if r.status_code != 200:
-        return []
+
     try:
+        r = requests.get(url, params=params, timeout=20)
+        if r.status_code != 200:
+            return []
         data = r.json()
-        if isinstance(data, list):
-            # filtro per data partita
-            out = []
-            for ev in data:
-                ct = (ev.get("commence_time") or "")[:10]
-                if ct == event_date:
-                    out.append(ev)
-            return out
-        return []
+        if not isinstance(data, list):
+            return []
+
+        out = []
+        for ev in data:
+            ct = (ev.get("commence_time") or "")[:10]
+            if ct == event_date:
+                out.append(ev)
+        return out
     except Exception:
         return []
 
@@ -290,7 +293,6 @@ def pick_preferred_bookmaker(bookmakers: List[Dict[str, Any]]) -> Tuple[Optional
     if not bookmakers:
         return None, "Nessun bookmaker"
 
-    # prima provo con quelli preferiti
     for pref in PREFERRED_BOOKMAKERS:
         for b in bookmakers:
             title = (b.get("title") or "").strip().lower()
@@ -298,7 +300,6 @@ def pick_preferred_bookmaker(bookmakers: List[Dict[str, Any]]) -> Tuple[Optional
             if pref in title or pref in key:
                 return b, b.get("title") or b.get("key") or "Bookmaker"
 
-    # altrimenti il primo disponibile
     b = bookmakers[0]
     return b, b.get("title") or b.get("key") or "Bookmaker"
 
@@ -362,12 +363,6 @@ def extract_odds_from_the_odds_event(event: Dict[str, Any]) -> Tuple[Dict[str, f
                     elif norm_text(name) == "under":
                         odds_map[f"Under {point}"] = price
 
-    # doppie chance ricavate dalle 1X2 solo se ci sono
-    if all(k in odds_map for k in ("1", "X", "2")):
-        # non sono quote reali bookmaker, quindi NON le invento
-        # le lasciamo fuori per evitare dati finti
-        pass
-
     return odds_map, bookmaker_name
 
 
@@ -378,10 +373,6 @@ def find_odds_for_match(
     home_name: str,
     away_name: str,
 ) -> Tuple[Dict[str, float], str, Dict[str, Any]]:
-    """
-    Cerca le quote per la partita usando The Odds API.
-    Restituisce: odds_map, bookmaker_name, debug_info
-    """
     debug = {
         "sport_key": None,
         "events_found": 0,
@@ -822,7 +813,6 @@ def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
         "No Goal (BTTS No)": 1.0 - rates.get("btts_yes", 0.0),
     }
 
-    # Doppie chance come probabilità modello
     out["1X"] = clamp(out["1"] + out["X"], 0.0, 1.0)
     out["X2"] = clamp(out["X"] + out["2"], 0.0, 1.0)
     out["12"] = clamp(out["1"] + out["2"], 0.0, 1.0)
@@ -832,20 +822,41 @@ def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
 
 def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) -> List[Dict[str, Any]]:
     rows = []
+
+    allowed_markets = {
+        "1", "X", "2",
+        "Over 1.5", "Over 2.5", "Over 3.5",
+        "Under 3.5", "Under 4.5",
+        "Goal (BTTS Sì)", "No Goal (BTTS No)"
+    }
+
     for market, prob in prob_map.items():
+        if market not in allowed_markets:
+            continue
+
         odd = odds_map.get(market)
         if odd is None or odd <= 1.0:
             continue
+
+        if prob < 0.42:
+            continue
+
+        if odd > 6.50:
+            continue
+
+        value_idx = (prob ** 1.35) * (odd ** 0.65)
+
         rows.append(
             {
                 "market": market,
                 "prob": prob,
                 "odd": odd,
-                "value_idx": prob * odd,
+                "value_idx": value_idx,
                 "risk": label_risk(market),
                 "source": "quota",
             }
         )
+
     rows.sort(key=lambda x: x["value_idx"], reverse=True)
     return rows
 
@@ -871,7 +882,52 @@ def build_model_only_table(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
 def pick_best_single(table: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not table:
         return None
-    return table[0]
+
+    preferred_order = {
+        "Over 1.5": 1,
+        "Under 4.5": 2,
+        "Under 3.5": 3,
+        "Over 2.5": 4,
+        "Goal (BTTS Sì)": 5,
+        "No Goal (BTTS No)": 6,
+        "1": 7,
+        "2": 8,
+        "X": 9,
+        "Over 3.5": 10,
+    }
+
+    top = table[:5]
+
+    def final_score(row):
+        prob = row["prob"]
+        odd = row["odd"]
+        market = row["market"]
+
+        bonus = 0.0
+
+        if market in {"Over 1.5", "Under 4.5", "Under 3.5"}:
+            bonus += 0.12
+        elif market in {"Over 2.5", "Goal (BTTS Sì)", "No Goal (BTTS No)"}:
+            bonus += 0.06
+
+        if odd >= 4.50:
+            bonus -= 0.12
+        elif odd >= 3.50:
+            bonus -= 0.06
+
+        if prob >= 0.70:
+            bonus += 0.10
+        elif prob >= 0.60:
+            bonus += 0.05
+
+        score = row["value_idx"] + bonus
+        rank_bonus = (20 - preferred_order.get(market, 20)) * 0.001
+        score += rank_bonus
+
+        return score
+
+    best = sorted(top, key=final_score, reverse=True)[0]
+    return best
 
 
 def signal_badge(x: float, source: str) -> str:
@@ -955,6 +1011,8 @@ def analyze_by_team_ids(
 
     if odds_map:
         value_table = build_value_table(market_probability_map(rec), odds_map)
+        if not value_table:
+            value_table = build_model_only_table(rec)
     else:
         value_table = build_model_only_table(rec)
 
@@ -1057,7 +1115,7 @@ def make_stop_plan(back_stake: float, back_odds: float, comm_pct: float, max_los
 # UI
 # =========================================================
 
-st.set_page_config(page_title="Trading Tool PRO (Calcio)", layout="wide")
+st.set_page_config(page_title="Trading Tool PRO (Calcio) — Analisi + Quote + Value", layout="wide")
 
 st.markdown(
     """
@@ -1323,12 +1381,12 @@ with tabs[0]:
                 rows_rank.append(
                     {
                         "Partita": f"{home} - {away}",
-                        "Giocata": best.get("market", "-"),
                         "Quota": "-" if best.get("odd") is None else f"{best.get('odd'):.2f}",
                         "Prob.": f"{best.get('prob', 0.0)*100:.0f}%",
                         "Indice": f"{score:.2f}",
                         "Origine": best.get("source", "-"),
                         "Bookmaker": result.get("bookmaker_used", "N/D"),
+                        "Giocata": best.get("market", "-"),
                     }
                 )
             st.dataframe(rows_rank, use_container_width=True)
