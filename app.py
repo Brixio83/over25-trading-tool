@@ -4,16 +4,18 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import streamlit as st
 
-# =============================
+# =========================================================
 # CONFIG
-# =============================
+# =========================================================
 
 API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
+THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
 DEFAULT_LEAGUES: Dict[str, int] = {
     "Serie A (ITA)": 135,
@@ -29,21 +31,36 @@ DEFAULT_LEAGUES: Dict[str, int] = {
     "Conference League": 848,
 }
 
-FALLBACK_BOOKMAKERS = [
-    "Netbet",
-    "Bet365",
-    "1xBet",
-    "Bwin",
-    "William Hill",
-    "Pinnacle",
-    "Unibet",
-    "Marathonbet",
-    "Betfair",
+# sport keys The Odds API
+ODDS_SPORT_KEYS: Dict[int, str] = {
+    135: "soccer_italy_serie_a",
+    136: "soccer_italy_serie_b",
+    39: "soccer_epl",
+    140: "soccer_spain_la_liga",
+    78: "soccer_germany_bundesliga",
+    61: "soccer_france_ligue_one",
+    88: "soccer_netherlands_eredivisie",
+    94: "soccer_portugal_primeira_liga",
+    2: "soccer_uefa_champs_league",
+    3: "soccer_uefa_europa_league",
+    848: "soccer_uefa_europa_conference_league",
+}
+
+PREFERRED_BOOKMAKERS = [
+    "netbet",
+    "bet365",
+    "bwin",
+    "unibet",
+    "william hill",
+    "pinnacle",
+    "betfair",
+    "1xbet",
+    "marathonbet",
 ]
 
-# =============================
+# =========================================================
 # UTILS
-# =============================
+# =========================================================
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -57,11 +74,18 @@ def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
-def norm_team_name(s: str) -> str:
-    s = s.strip().lower()
+def norm_text(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace("’", "'")
+    s = s.replace("&", " and ")
     s = re.sub(r"[^a-z0-9\s\-]", " ", s)
+    s = re.sub(r"\b(fc|cf|ac|afc|calcio|club|football club|sv|sc|ss|ssc)\b", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, norm_text(a), norm_text(b)).ratio()
 
 
 def parse_match_input(text: str) -> Optional[Tuple[str, str]]:
@@ -80,7 +104,7 @@ def api_football_headers(api_key: str) -> Dict[str, str]:
     return {"x-apisports-key": api_key}
 
 
-def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], timeout: int = 25) -> Dict[str, Any]:
+def safe_json_get(url: str, headers: Dict[str, str], params: Dict[str, Any], timeout: int = 25) -> Dict[str, Any]:
     r = requests.get(url, headers=headers, params=params, timeout=timeout)
     try:
         data = r.json()
@@ -91,28 +115,28 @@ def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], tim
     return data
 
 
-# =============================
+# =========================================================
 # API-FOOTBALL
-# =============================
+# =========================================================
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def search_team(api_key: str, query: str) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/teams"
-    data = http_get_json(url, api_football_headers(api_key), {"search": query})
+    data = safe_json_get(url, api_football_headers(api_key), {"search": query})
     return data.get("response", []) or []
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_team_last_fixtures(api_key: str, team_id: int, season: int, last: int = 10) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/fixtures"
-    data = http_get_json(url, api_football_headers(api_key), {"team": team_id, "season": season, "last": last})
+    data = safe_json_get(url, api_football_headers(api_key), {"team": team_id, "season": season, "last": last})
     return data.get("response", []) or []
 
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_team_next_fixtures(api_key: str, team_id: int, season: int, nxt: int = 25) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/fixtures"
-    data = http_get_json(url, api_football_headers(api_key), {"team": team_id, "season": season, "next": nxt})
+    data = safe_json_get(url, api_football_headers(api_key), {"team": team_id, "season": season, "next": nxt})
     return data.get("response", []) or []
 
 
@@ -135,7 +159,7 @@ def get_fixtures_in_range(
     }
     if league_id:
         params["league"] = league_id
-    data = http_get_json(url, api_football_headers(api_key), params)
+    data = safe_json_get(url, api_football_headers(api_key), params)
     return (data.get("response", []) or [])[:limit]
 
 
@@ -145,7 +169,7 @@ def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[in
     params: Dict[str, Any] = {"team": team_id, "season": season}
     if league_id:
         params["league"] = league_id
-    data = http_get_json(url, api_football_headers(api_key), params)
+    data = safe_json_get(url, api_football_headers(api_key), params)
     return data.get("response", []) or []
 
 
@@ -159,28 +183,8 @@ def get_fixtures_by_date_and_league(api_key: str, day: str, league_id: int) -> L
 
     url = f"{API_FOOTBALL_BASE}/fixtures"
     params = {"date": day, "league": league_id, "season": season}
-    data = http_get_json(url, api_football_headers(api_key), params)
+    data = safe_json_get(url, api_football_headers(api_key), params)
     return data.get("response", []) or []
-
-
-@st.cache_data(ttl=60 * 10, show_spinner=False)
-def get_fixture_odds(api_key: str, fixture_id: int) -> List[Dict[str, Any]]:
-    url = f"{API_FOOTBALL_BASE}/odds"
-    data = http_get_json(url, api_football_headers(api_key), {"fixture": fixture_id})
-    return data.get("response", []) or []
-
-
-@st.cache_data(ttl=60 * 10, show_spinner=False)
-def get_odds_bookmakers(api_key: str) -> List[Dict[str, Any]]:
-    url = f"{API_FOOTBALL_BASE}/odds/bookmakers"
-    data = http_get_json(url, api_football_headers(api_key), {})
-    return data.get("response", []) or []
-
-
-def debug_fixture_odds(api_key: str, fixture_id: int) -> Dict[str, Any]:
-    url = f"{API_FOOTBALL_BASE}/odds"
-    data = http_get_json(url, api_football_headers(api_key), {"fixture": fixture_id})
-    return data
 
 
 def fixture_match_teams(fx: Dict[str, Any], a_id: int, b_id: int) -> bool:
@@ -235,128 +239,219 @@ def find_fixture_smart(
     )
 
 
-# =============================
-# ODDS
-# =============================
+# =========================================================
+# THE ODDS API
+# =========================================================
 
-def normalize_bookmaker_name(name: str) -> str:
-    return (name or "").strip().lower()
-
-
-def normalize_bet_label(name: str) -> str:
-    return re.sub(r"\s+", " ", (name or "").strip().lower())
+def odds_api_headers() -> Dict[str, str]:
+    return {}
 
 
-def normalize_value_label(v: str) -> str:
-    return re.sub(r"\s+", " ", (v or "").strip().lower())
+@st.cache_data(ttl=60 * 10, show_spinner=False)
+def get_the_odds_api_events(
+    odds_api_key: str,
+    sport_key: str,
+    event_date: str,
+    regions: str = "eu",
+    markets: str = "h2h,totals",
+    odds_format: str = "decimal",
+    date_format: str = "iso",
+) -> List[Dict[str, Any]]:
+    """
+    Scarica gli eventi con quote per uno sport The Odds API.
+    """
+    url = f"{THE_ODDS_API_BASE}/sports/{sport_key}/odds"
+    params = {
+        "apiKey": odds_api_key,
+        "regions": regions,
+        "markets": markets,
+        "oddsFormat": odds_format,
+        "dateFormat": date_format,
+    }
+    r = requests.get(url, headers=odds_api_headers(), params=params, timeout=20)
+    if r.status_code != 200:
+        return []
+    try:
+        data = r.json()
+        if isinstance(data, list):
+            # filtro per data partita
+            out = []
+            for ev in data:
+                ct = (ev.get("commence_time") or "")[:10]
+                if ct == event_date:
+                    out.append(ev)
+            return out
+        return []
+    except Exception:
+        return []
 
 
-def choose_bookmaker_from_odds(odds_response: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
-    candidates = []
-    for item in odds_response:
-        bookmaker = item.get("bookmaker", {}) or {}
-        if bookmaker.get("name"):
-            candidates.append(item)
-
-    if not candidates:
+def pick_preferred_bookmaker(bookmakers: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
+    if not bookmakers:
         return None, "Nessun bookmaker"
 
-    for item in candidates:
-        name = normalize_bookmaker_name((item.get("bookmaker", {}) or {}).get("name", ""))
-        if "netbet" in name:
-            return item, (item.get("bookmaker", {}) or {}).get("name", "NetBet")
+    # prima provo con quelli preferiti
+    for pref in PREFERRED_BOOKMAKERS:
+        for b in bookmakers:
+            title = (b.get("title") or "").strip().lower()
+            key = (b.get("key") or "").strip().lower()
+            if pref in title or pref in key:
+                return b, b.get("title") or b.get("key") or "Bookmaker"
 
-    for pref in FALLBACK_BOOKMAKERS:
-        pref_n = pref.lower()
-        for item in candidates:
-            name = normalize_bookmaker_name((item.get("bookmaker", {}) or {}).get("name", ""))
-            if pref_n in name:
-                return item, (item.get("bookmaker", {}) or {}).get("name", pref)
-
-    first = candidates[0]
-    return first, (first.get("bookmaker", {}) or {}).get("name", "Bookmaker")
+    # altrimenti il primo disponibile
+    b = bookmakers[0]
+    return b, b.get("title") or b.get("key") or "Bookmaker"
 
 
-def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    bets = bookmaker_item.get("bets", []) or []
+def extract_odds_from_the_odds_event(event: Dict[str, Any]) -> Tuple[Dict[str, float], str]:
+    bookmakers = event.get("bookmakers", []) or []
+    bookmaker, bookmaker_name = pick_preferred_bookmaker(bookmakers)
+    if not bookmaker:
+        return {}, "Nessun bookmaker"
 
-    for bet in bets:
-        bet_name = normalize_bet_label(bet.get("name", ""))
-        values = bet.get("values", []) or []
+    odds_map: Dict[str, float] = {}
+    home_team = event.get("home_team", "")
+    away_team = event.get("away_team", "")
 
-        if bet_name in {"match winner", "winner", "match result"}:
-            for v in values:
-                label = normalize_value_label(v.get("value", ""))
-                odd = v.get("odd")
+    for market in bookmaker.get("markets", []) or []:
+        mkey = market.get("key")
+
+        if mkey == "h2h":
+            draw_price = None
+            home_price = None
+            away_price = None
+
+            for o in market.get("outcomes", []) or []:
+                name = o.get("name", "")
+                price = o.get("price")
                 try:
-                    odd_f = float(odd)
-                except Exception:
-                    continue
-                if label in {"home", "1"}:
-                    out["1"] = odd_f
-                elif label in {"draw", "x"}:
-                    out["X"] = odd_f
-                elif label in {"away", "2"}:
-                    out["2"] = odd_f
-
-        elif bet_name in {"double chance"}:
-            for v in values:
-                label = normalize_value_label(v.get("value", ""))
-                odd = v.get("odd")
-                try:
-                    odd_f = float(odd)
-                except Exception:
-                    continue
-                if label in {"home/draw", "1x"}:
-                    out["1X"] = odd_f
-                elif label in {"draw/away", "x2"}:
-                    out["X2"] = odd_f
-                elif label in {"home/away", "12"}:
-                    out["12"] = odd_f
-
-        elif "goals over/under" in bet_name or "over/under" in bet_name:
-            for v in values:
-                label = normalize_value_label(v.get("value", ""))
-                odd = v.get("odd")
-                try:
-                    odd_f = float(odd)
+                    price = float(price)
                 except Exception:
                     continue
 
-                if label.startswith("over "):
-                    raw = label.replace("over ", "").strip()
-                    if raw in {"1.5", "2.5", "3.5", "4.5", "5.5"}:
-                        out[f"Over {raw}"] = odd_f
-                elif label.startswith("under "):
-                    raw = label.replace("under ", "").strip()
-                    if raw in {"1.5", "2.5", "3.5", "4.5", "5.5"}:
-                        out[f"Under {raw}"] = odd_f
+                if norm_text(name) == norm_text(home_team):
+                    home_price = price
+                elif norm_text(name) == norm_text(away_team):
+                    away_price = price
+                elif norm_text(name) == "draw":
+                    draw_price = price
 
-        elif bet_name in {"both teams score", "both teams to score"}:
-            for v in values:
-                label = normalize_value_label(v.get("value", ""))
-                odd = v.get("odd")
+            if home_price:
+                odds_map["1"] = home_price
+            if draw_price:
+                odds_map["X"] = draw_price
+            if away_price:
+                odds_map["2"] = away_price
+
+        elif mkey == "totals":
+            for o in market.get("outcomes", []) or []:
+                name = o.get("name", "")
+                point = o.get("point")
+                price = o.get("price")
                 try:
-                    odd_f = float(odd)
+                    price = float(price)
                 except Exception:
                     continue
-                if label in {"yes", "y"}:
-                    out["Goal (BTTS Sì)"] = odd_f
-                elif label in {"no", "n"}:
-                    out["No Goal (BTTS No)"] = odd_f
 
-    return out
+                if point is None:
+                    continue
+
+                if str(point) in {"1.5", "2.5", "3.5", "4.5", "5.5"}:
+                    if norm_text(name) == "over":
+                        odds_map[f"Over {point}"] = price
+                    elif norm_text(name) == "under":
+                        odds_map[f"Under {point}"] = price
+
+    # doppie chance ricavate dalle 1X2 solo se ci sono
+    if all(k in odds_map for k in ("1", "X", "2")):
+        # non sono quote reali bookmaker, quindi NON le invento
+        # le lasciamo fuori per evitare dati finti
+        pass
+
+    return odds_map, bookmaker_name
 
 
-# =============================
+def find_odds_for_match(
+    odds_api_key: str,
+    league_id: Optional[int],
+    match_date: Optional[str],
+    home_name: str,
+    away_name: str,
+) -> Tuple[Dict[str, float], str, Dict[str, Any]]:
+    """
+    Cerca le quote per la partita usando The Odds API.
+    Restituisce: odds_map, bookmaker_name, debug_info
+    """
+    debug = {
+        "sport_key": None,
+        "events_found": 0,
+        "matched_event": None,
+    }
+
+    if not odds_api_key or not league_id or not match_date:
+        return {}, "ODDS API non configurata", debug
+
+    sport_key = ODDS_SPORT_KEYS.get(league_id)
+    debug["sport_key"] = sport_key
+
+    if not sport_key:
+        return {}, "Sport key non mappata", debug
+
+    events = get_the_odds_api_events(
+        odds_api_key=odds_api_key,
+        sport_key=sport_key,
+        event_date=match_date,
+        regions="eu",
+        markets="h2h,totals",
+        odds_format="decimal",
+        date_format="iso",
+    )
+    debug["events_found"] = len(events)
+
+    if not events:
+        return {}, "Nessun evento The Odds API", debug
+
+    best_event = None
+    best_score = 0.0
+
+    for ev in events:
+        home_ev = ev.get("home_team", "")
+        away_ev = ev.get("away_team", "")
+        s1 = similarity(home_name, home_ev)
+        s2 = similarity(away_name, away_ev)
+        score_direct = (s1 + s2) / 2.0
+
+        s3 = similarity(home_name, away_ev)
+        s4 = similarity(away_name, home_ev)
+        score_swapped = (s3 + s4) / 2.0
+
+        score = max(score_direct, score_swapped)
+        if score > best_score:
+            best_score = score
+            best_event = ev
+
+    if not best_event or best_score < 0.60:
+        return {}, "Match quote non trovato", debug
+
+    debug["matched_event"] = {
+        "home_team": best_event.get("home_team"),
+        "away_team": best_event.get("away_team"),
+        "commence_time": best_event.get("commence_time"),
+        "score": round(best_score, 3),
+    }
+
+    odds_map, bookmaker_name = extract_odds_from_the_odds_event(best_event)
+    return odds_map, bookmaker_name, debug
+
+
+# =========================================================
 # CORNER
-# =============================
+# =========================================================
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_fixture_statistics(api_key: str, fixture_id: int) -> List[Dict[str, Any]]:
     url = f"{API_FOOTBALL_BASE}/fixtures/statistics"
-    data = http_get_json(url, api_football_headers(api_key), {"fixture": fixture_id})
+    data = safe_json_get(url, api_football_headers(api_key), {"fixture": fixture_id})
     return data.get("response", []) or []
 
 
@@ -479,9 +574,9 @@ def build_corner_recos(a_c: Dict[str, Any], b_c: Dict[str, Any]) -> Dict[str, An
     }
 
 
-# =============================
+# =========================================================
 # ANALISI
-# =============================
+# =========================================================
 
 def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[str, Any]:
     pts = 0
@@ -532,7 +627,17 @@ def summarize_form(last_fixtures: List[Dict[str, Any]], team_id: int) -> Dict[st
 
     played = len(form)
     if played == 0:
-        return {"matches": 0, "points": 0, "ppg": 0.0, "gf": 0, "ga": 0, "avg_total_goals": 0.0, "form": "", "totals": [], "btts": []}
+        return {
+            "matches": 0,
+            "points": 0,
+            "ppg": 0.0,
+            "gf": 0,
+            "ga": 0,
+            "avg_total_goals": 0.0,
+            "form": "",
+            "totals": [],
+            "btts": [],
+        }
 
     avg_total_goals = (gf + ga) / played
     return {
@@ -638,13 +743,22 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
 
     if r["o25"] >= 0.62 and avg_goals >= 2.7:
         primary = ("Over 2.5", f"Trend gol alto: Over 2.5 ≈ {r['o25']*100:.0f}%.")
-        alt = [("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%."), ("Over 3.5", f"Over 3.5 ≈ {r['o35']*100:.0f}%.")]
+        alt = [
+            ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%."),
+            ("Over 3.5", f"Over 3.5 ≈ {r['o35']*100:.0f}%."),
+        ]
     elif r["u35"] >= 0.70 and avg_goals <= 2.4:
         primary = ("Under 3.5", f"Trend gol basso: Under 3.5 ≈ {r['u35']*100:.0f}%.")
-        alt = [("Over 1.5", f"Over 1.5 ≈ {r['o15']*100:.0f}%."), ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%.")]
+        alt = [
+            ("Over 1.5", f"Over 1.5 ≈ {r['o15']*100:.0f}%."),
+            ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%."),
+        ]
     else:
         primary = ("Over 1.5", f"Zona centrale: Over 1.5 ≈ {r['o15']*100:.0f}%.")
-        alt = [("Over 2.5", f"Over 2.5 ≈ {r['o25']*100:.0f}%."), ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%.")]
+        alt = [
+            ("Over 2.5", f"Over 2.5 ≈ {r['o25']*100:.0f}%."),
+            ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%."),
+        ]
 
     btts_yes = r["btts_yes"]
     if btts_yes >= 0.62:
@@ -687,20 +801,18 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
     }
 
 
-# =============================
+# =========================================================
 # VALUE ENGINE
-# =============================
+# =========================================================
 
 def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
     probs_1x2 = rec["outright"]["probs"]
     rates = rec["meta"]["rates"]
-    return {
+
+    out = {
         "1": probs_1x2.get("1", 0.0),
         "X": probs_1x2.get("X", 0.0),
         "2": probs_1x2.get("2", 0.0),
-        "1X": clamp(probs_1x2.get("1", 0.0) + probs_1x2.get("X", 0.0), 0.0, 1.0),
-        "X2": clamp(probs_1x2.get("X", 0.0) + probs_1x2.get("2", 0.0), 0.0, 1.0),
-        "12": clamp(probs_1x2.get("1", 0.0) + probs_1x2.get("2", 0.0), 0.0, 1.0),
         "Over 1.5": rates.get("o15", 0.0),
         "Over 2.5": rates.get("o25", 0.0),
         "Over 3.5": rates.get("o35", 0.0),
@@ -710,6 +822,13 @@ def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
         "No Goal (BTTS No)": 1.0 - rates.get("btts_yes", 0.0),
     }
 
+    # Doppie chance come probabilità modello
+    out["1X"] = clamp(out["1"] + out["X"], 0.0, 1.0)
+    out["X2"] = clamp(out["X"] + out["2"], 0.0, 1.0)
+    out["12"] = clamp(out["1"] + out["2"], 0.0, 1.0)
+
+    return out
+
 
 def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) -> List[Dict[str, Any]]:
     rows = []
@@ -717,14 +836,16 @@ def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) ->
         odd = odds_map.get(market)
         if odd is None or odd <= 1.0:
             continue
-        rows.append({
-            "market": market,
-            "prob": prob,
-            "odd": odd,
-            "value_idx": prob * odd,
-            "risk": label_risk(market),
-            "source": "quota",
-        })
+        rows.append(
+            {
+                "market": market,
+                "prob": prob,
+                "odd": odd,
+                "value_idx": prob * odd,
+                "risk": label_risk(market),
+                "source": "quota",
+            }
+        )
     rows.sort(key=lambda x: x["value_idx"], reverse=True)
     return rows
 
@@ -733,14 +854,16 @@ def build_model_only_table(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     prob_map = market_probability_map(rec)
     rows = []
     for market, prob in prob_map.items():
-        rows.append({
-            "market": market,
-            "prob": prob,
-            "odd": None,
-            "value_idx": prob,
-            "risk": label_risk(market),
-            "source": "modello",
-        })
+        rows.append(
+            {
+                "market": market,
+                "prob": prob,
+                "odd": None,
+                "value_idx": prob,
+                "risk": label_risk(market),
+                "source": "modello",
+            }
+        )
     rows.sort(key=lambda x: x["value_idx"], reverse=True)
     return rows
 
@@ -766,9 +889,9 @@ def signal_badge(x: float, source: str) -> str:
         return "🟠 Debole dal modello"
 
 
-# =============================
+# =========================================================
 # PIPELINE MATCH
-# =============================
+# =========================================================
 
 def fixture_label(fx: Dict[str, Any]) -> str:
     teams = fx.get("teams", {}) or {}
@@ -787,37 +910,48 @@ def fixture_label(fx: Dict[str, Any]) -> str:
     return f"{hhmm}  {home} - {away}  •  {l_name}"
 
 
-def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Optional[int], home_name: str, away_name: str) -> Dict[str, Any]:
-    pick = find_fixture_smart(api_key, home_id, away_id, league_id)
+def analyze_by_team_ids(
+    api_football_key: str,
+    odds_api_key: str,
+    home_id: int,
+    away_id: int,
+    league_id: Optional[int],
+    home_name: str,
+    away_name: str,
+) -> Dict[str, Any]:
+    pick = find_fixture_smart(api_football_key, home_id, away_id, league_id)
     season = pick.season
 
-    home_last = get_team_last_fixtures(api_key, home_id, season, last=10)
-    away_last = get_team_last_fixtures(api_key, away_id, season, last=10)
+    home_last = get_team_last_fixtures(api_football_key, home_id, season, last=10)
+    away_last = get_team_last_fixtures(api_football_key, away_id, season, last=10)
 
     home_sum = summarize_form(home_last, home_id)
     away_sum = summarize_form(away_last, away_id)
 
-    inj_home = get_injuries(api_key, home_id, season, league_id if league_id else None)
-    inj_away = get_injuries(api_key, away_id, season, league_id if league_id else None)
+    inj_home = get_injuries(api_football_key, home_id, season, league_id if league_id else None)
+    inj_away = get_injuries(api_football_key, away_id, season, league_id if league_id else None)
 
     rec = recommend_for_match(home_sum, away_sum)
 
-    a_corner = compute_team_corner_profile(api_key, home_id, season, last_n=10)
-    b_corner = compute_team_corner_profile(api_key, away_id, season, last_n=10)
+    a_corner = compute_team_corner_profile(api_football_key, home_id, season, last_n=10)
+    b_corner = compute_team_corner_profile(api_football_key, away_id, season, last_n=10)
     corner_reco = build_corner_recos(a_corner, b_corner)
 
-    bookmaker_used = "Nessuna quota"
     odds_map: Dict[str, float] = {}
+    bookmaker_used = "Nessuna quota"
     odds_debug: Dict[str, Any] = {}
 
+    match_date = None
     if pick.fixture:
-        fixture_id = (pick.fixture.get("fixture", {}) or {}).get("id")
-        if fixture_id:
-            odds_debug = debug_fixture_odds(api_key, int(fixture_id))
-            odds_resp = odds_debug.get("response", []) or []
-            bookmaker_item, bookmaker_used = choose_bookmaker_from_odds(odds_resp)
-            if bookmaker_item:
-                odds_map = extract_market_odds_from_bookmaker(bookmaker_item)
+        match_date = ((pick.fixture.get("fixture", {}) or {}).get("date") or "")[:10]
+
+    odds_map, bookmaker_used, odds_debug = find_odds_for_match(
+        odds_api_key=odds_api_key,
+        league_id=league_id,
+        match_date=match_date,
+        home_name=home_name,
+        away_name=away_name,
+    )
 
     if odds_map:
         value_table = build_value_table(market_probability_map(rec), odds_map)
@@ -845,9 +979,9 @@ def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Opt
     }
 
 
-# =============================
+# =========================================================
 # TRADING / STOP
-# =============================
+# =========================================================
 
 def lay_liability(lay_stake: float, lay_odds: float) -> float:
     return lay_stake * (lay_odds - 1.0)
@@ -905,21 +1039,23 @@ def make_stop_plan(back_stake: float, back_odds: float, comm_pct: float, max_los
             plan.append({"Stop": f"+{s}%", "Quota stop": round(quota_stop, 2), "Banca consigliata": "—", "Esito se VINCI": "—", "Esito se PERDI": "—", "Note": note})
             continue
 
-        plan.append({
-            "Stop": f"+{s}%",
-            "Quota stop": round(quota_stop, 2),
-            "Banca consigliata": f"{lay_stake_:.2f} €",
-            "Esito se VINCI": f"{win_pnl:+.2f} €",
-            "Esito se PERDI": f"{lose_pnl:+.2f} €",
-            "Note": "OK",
-        })
+        plan.append(
+            {
+                "Stop": f"+{s}%",
+                "Quota stop": round(quota_stop, 2),
+                "Banca consigliata": f"{lay_stake_:.2f} €",
+                "Esito se VINCI": f"{win_pnl:+.2f} €",
+                "Esito se PERDI": f"{lose_pnl:+.2f} €",
+                "Note": "OK",
+            }
+        )
 
     return plan
 
 
-# =============================
+# =========================================================
 # UI
-# =============================
+# =========================================================
 
 st.set_page_config(page_title="Trading Tool PRO (Calcio)", layout="wide")
 
@@ -950,10 +1086,11 @@ st.markdown(
 )
 
 st.title("⚽ Trading Tool PRO (Calcio) — Analisi + Quote + Value")
-st.caption("Analisi su dati recenti e quote bookmaker. Non è una previsione certa.")
+st.caption("Analisi su dati recenti, forma e quote disponibili. Non è una previsione certa.")
 
 secrets_keys = dict(st.secrets) if hasattr(st, "secrets") else {}
 api_football_key = secrets_keys.get("API_FOOTBALL_KEY", "")
+odds_api_key = secrets_keys.get("ODDS_API_KEY", "")
 
 with st.expander("🔧 DEBUG (solo se serve)", expanded=False):
     st.json({k: ("***" if "KEY" in k else v) for k, v in secrets_keys.items()})
@@ -963,23 +1100,17 @@ with st.expander("🔧 DEBUG (solo se serve)", expanded=False):
     else:
         st.warning("API_FOOTBALL_KEY NON trovata nei Secrets.")
 
-    st.markdown("### Debug bookmakers")
-    try:
-        books = get_odds_bookmakers(api_football_key)
-        st.write("Numero bookmakers trovati:", len(books))
-        if books:
-            st.dataframe(
-                [{"id": b.get("id"), "name": b.get("name")} for b in books[:50]],
-                use_container_width=True
-            )
-        else:
-            st.warning("Nessun bookmaker trovato dalla API.")
-    except Exception as e:
-        st.error(f"Errore nel caricamento bookmakers: {e}")
+    if odds_api_key:
+        st.write(f"ODDS_API_KEY presente (lunghezza {len(odds_api_key)}).")
+    else:
+        st.warning("ODDS_API_KEY NON trovata nei Secrets.")
 
 if not api_football_key:
     st.error("Manca API_FOOTBALL_KEY nei Secrets.")
     st.stop()
+
+if not odds_api_key:
+    st.warning("ODDS_API_KEY non trovata. L'app funzionerà, ma le quote useranno il fallback del modello.")
 
 tabs = st.tabs(["📊 Analisi partita (PRO)", "🧮 Trading / Stop (Manuale)"])
 
@@ -1007,26 +1138,14 @@ def render_analysis(res: Dict[str, Any]):
 <div class="card">
 <b>{hn} vs {an}</b><br/>
 <span class="small-muted">{pick.message}</span><br/>
-<span class="small-muted"><b>Bookmaker:</b> {bookmaker_used}</span>
+<span class="small-muted"><b>Bookmaker quote:</b> {bookmaker_used}</span>
 </div>
 """,
         unsafe_allow_html=True,
     )
 
-    if pick.fixture:
-        fixture_id = (pick.fixture.get("fixture", {}) or {}).get("id")
-        if fixture_id:
-            with st.expander("DEBUG QUOTE FIXTURE", expanded=False):
-                st.write("Fixture ID:", fixture_id)
-                st.write("HTTP status:", odds_debug.get("_http_status"))
-                st.write("URL:", odds_debug.get("_url"))
-                st.write("Numero righe response:", len(odds_debug.get("response", []) or []))
-                if odds_debug.get("errors"):
-                    st.write("Errors:", odds_debug.get("errors"))
-                else:
-                    st.write("Errors: nessuno")
-                if odds_debug.get("response"):
-                    st.json((odds_debug.get("response", []) or [])[:1])
+    with st.expander("DEBUG QUOTE MATCH", expanded=False):
+        st.write(odds_debug)
 
     c1, c2 = st.columns(2)
 
@@ -1081,14 +1200,16 @@ def render_analysis(res: Dict[str, Any]):
     if value_table:
         rows = []
         for r in value_table[:10]:
-            rows.append({
-                "Mercato": r["market"],
-                "Probabilità": f"{r['prob']*100:.0f}%",
-                "Quota": "-" if r.get("odd") is None else f"{r['odd']:.2f}",
-                "Indice": f"{r['value_idx']:.2f}",
-                "Origine": r["source"],
-                "Rischio": r["risk"],
-            })
+            rows.append(
+                {
+                    "Mercato": r["market"],
+                    "Probabilità": f"{r['prob']*100:.0f}%",
+                    "Quota": "-" if r.get("odd") is None else f"{r['odd']:.2f}",
+                    "Indice": f"{r['value_idx']:.2f}",
+                    "Origine": r["source"],
+                    "Rischio": r["risk"],
+                }
+            )
         st.dataframe(rows, use_container_width=True)
 
     st.markdown("## 🎯 Corner")
@@ -1097,6 +1218,8 @@ def render_analysis(res: Dict[str, Any]):
     else:
         if corner_reco.get("no_bet"):
             st.warning("Corner: meglio non forzare.")
+            for rr in corner_reco.get("no_bet_reasons", []):
+                st.write(f"- {rr}")
         else:
             st.write(f"Prudente: **{corner_reco['prudente']}**")
             st.write(f"Medio: **{corner_reco['medio']}**")
@@ -1106,7 +1229,7 @@ def render_analysis(res: Dict[str, Any]):
 with tabs[0]:
     st.subheader("📊 Analisi partita (PRO)")
 
-    mode_tabs = st.tabs(["🗓️ Partite del giorno (max 10)", "✍️ Inserisci partita manualmente"])
+    mode_tabs = st.tabs(["🗓️ Partite del giorno", "✍️ Inserisci partita manualmente"])
 
     with mode_tabs[0]:
         st.markdown("### 🗓️ Partite del giorno")
@@ -1135,11 +1258,13 @@ with tabs[0]:
                     for lname in selected_leagues:
                         lid = DEFAULT_LEAGUES[lname]
                         fx = get_fixtures_by_date_and_league(api_football_key, day_str, lid)
-                        debug_counts.append({
-                            "lega": lname,
-                            "league_id": lid,
-                            "trovate_api": len(fx),
-                        })
+                        debug_counts.append(
+                            {
+                                "lega": lname,
+                                "league_id": lid,
+                                "trovate_api": len(fx),
+                            }
+                        )
                         for f in fx:
                             status = (((f.get("fixture", {}) or {}).get("status", {}) or {}).get("short")) or ""
                             if status in {"FT", "AET", "PEN", "CANC", "PST", "ABD"}:
@@ -1153,21 +1278,22 @@ with tabs[0]:
                     for fx in all_fx[:40]:
                         teams = fx.get("teams", {}) or {}
                         league = fx.get("league", {}) or {}
-
                         home = teams.get("home", {}) or {}
                         away = teams.get("away", {}) or {}
+
                         home_id = home.get("id")
                         away_id = away.get("id")
                         if not home_id or not away_id:
                             continue
 
                         result = analyze_by_team_ids(
-                            api_football_key,
-                            int(home_id),
-                            int(away_id),
-                            int(league.get("id", 0) or 0) or None,
-                            home.get("name", "Home"),
-                            away.get("name", "Away"),
+                            api_football_key=api_football_key,
+                            odds_api_key=odds_api_key,
+                            home_id=int(home_id),
+                            away_id=int(away_id),
+                            league_id=int(league.get("id", 0) or 0) or None,
+                            home_name=home.get("name", "Home"),
+                            away_name=away.get("name", "Away"),
                         )
 
                         best_single = result.get("best_single")
@@ -1177,7 +1303,7 @@ with tabs[0]:
                         ranked.append((float(best_single["value_idx"]), fx, result))
 
                     ranked.sort(key=lambda x: x[0], reverse=True)
-                    st.session_state["day_ranked"] = ranked[:int(max_out)]
+                    st.session_state["day_ranked"] = ranked[: int(max_out)]
 
         dbg = st.session_state.get("debug_counts", [])
         if dbg:
@@ -1194,15 +1320,17 @@ with tabs[0]:
                 home = (teams.get("home", {}) or {}).get("name", "Home")
                 away = (teams.get("away", {}) or {}).get("name", "Away")
                 best = result.get("best_single", {})
-                rows_rank.append({
-                    "Partita": f"{home} - {away}",
-                    "Giocata": best.get("market", "-"),
-                    "Quota": "-" if best.get("odd") is None else f"{best.get('odd'):.2f}",
-                    "Prob.": f"{best.get('prob', 0.0)*100:.0f}%",
-                    "Indice": f"{score:.2f}",
-                    "Origine": best.get("source", "-"),
-                    "Bookmaker": result.get("bookmaker_used", "N/D"),
-                })
+                rows_rank.append(
+                    {
+                        "Partita": f"{home} - {away}",
+                        "Giocata": best.get("market", "-"),
+                        "Quota": "-" if best.get("odd") is None else f"{best.get('odd'):.2f}",
+                        "Prob.": f"{best.get('prob', 0.0)*100:.0f}%",
+                        "Indice": f"{score:.2f}",
+                        "Origine": best.get("source", "-"),
+                        "Bookmaker": result.get("bookmaker_used", "N/D"),
+                    }
+                )
             st.dataframe(rows_rank, use_container_width=True)
 
             labels = [fixture_label(fx) for _, fx, _ in ranked]
@@ -1226,7 +1354,7 @@ with tabs[0]:
         if st.button("🔎 Analizza (manuale)", type="primary", use_container_width=True):
             parsed = parse_match_input(match_text)
             if not parsed:
-                st.error("Scrivi la partita tipo: 'Juve - Atalanta'.")
+                st.error("Scrivi la partita tipo: Juve - Atalanta")
                 st.stop()
 
             home_name_in, away_name_in = parsed
@@ -1243,13 +1371,13 @@ with tabs[0]:
                 st.stop()
 
             def pick_best(cands: List[Dict[str, Any]], q: str) -> Dict[str, Any]:
-                qn = norm_team_name(q)
+                qn = norm_text(q)
                 best = cands[0]
-                best_score = -1
+                best_score = -1.0
                 for c in cands:
                     name = (c.get("team", {}) or {}).get("name", "") or ""
-                    nn = norm_team_name(name)
-                    score = 0
+                    nn = norm_text(name)
+                    score = 0.0
                     if nn == qn:
                         score += 100
                     if qn in nn:
@@ -1273,7 +1401,15 @@ with tabs[0]:
                 st.stop()
 
             with st.spinner("Analizzo..."):
-                result = analyze_by_team_ids(api_football_key, int(home_id), int(away_id), league_id, home_real, away_real)
+                result = analyze_by_team_ids(
+                    api_football_key=api_football_key,
+                    odds_api_key=odds_api_key,
+                    home_id=int(home_id),
+                    away_id=int(away_id),
+                    league_id=league_id,
+                    home_name=home_real,
+                    away_name=away_real,
+                )
 
             render_analysis(result)
 
