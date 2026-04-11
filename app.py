@@ -170,6 +170,19 @@ def get_fixture_odds(api_key: str, fixture_id: int) -> List[Dict[str, Any]]:
     return data.get("response", []) or []
 
 
+@st.cache_data(ttl=60 * 10, show_spinner=False)
+def get_odds_bookmakers(api_key: str) -> List[Dict[str, Any]]:
+    url = f"{API_FOOTBALL_BASE}/odds/bookmakers"
+    data = http_get_json(url, api_football_headers(api_key), {})
+    return data.get("response", []) or []
+
+
+def debug_fixture_odds(api_key: str, fixture_id: int) -> Dict[str, Any]:
+    url = f"{API_FOOTBALL_BASE}/odds"
+    data = http_get_json(url, api_football_headers(api_key), {"fixture": fixture_id})
+    return data
+
+
 def fixture_match_teams(fx: Dict[str, Any], a_id: int, b_id: int) -> bool:
     teams = fx.get("teams", {}) or {}
     home = (teams.get("home", {}) or {}).get("id")
@@ -387,8 +400,6 @@ def _nearest_corner_line(x: float, lo: float = 3.5, hi: float = 12.5) -> float:
 def compute_team_corner_profile(api_key: str, team_id: int, season: int, last_n: int = 10) -> Dict[str, Any]:
     last_fx = get_team_last_fixtures(api_key, team_id, season, last=last_n)
 
-    corners_for: List[float] = []
-    corners_against: List[float] = []
     corners_total: List[float] = []
 
     for fx in last_fx:
@@ -417,43 +428,33 @@ def compute_team_corner_profile(api_key: str, team_id: int, season: int, last_n:
         if cf is None or ca is None:
             continue
 
-        corners_for.append(float(cf))
-        corners_against.append(float(ca))
         corners_total.append(float(cf + ca))
 
     if len(corners_total) == 0:
         return {
             "matches_used": 0,
-            "for_avg": 0.0,
-            "against_avg": 0.0,
             "total_avg": 0.0,
             "total_std": 0.0,
-            "last5_total_avg": 0.0,
             "trend": 0.0,
         }
 
     total_avg = _mean(corners_total)
     total_std = _std(corners_total)
     last5 = corners_total[-5:] if len(corners_total) >= 5 else corners_total
-    last5_avg = _mean(last5)
-    trend = last5_avg - total_avg
+    trend = _mean(last5) - total_avg
 
     return {
         "matches_used": len(corners_total),
-        "for_avg": _mean(corners_for),
-        "against_avg": _mean(corners_against),
         "total_avg": total_avg,
         "total_std": total_std,
-        "last5_total_avg": last5_avg,
         "trend": trend,
     }
 
 
-def build_corner_recos(a_c: Dict[str, Any], b_c: Dict[str, Any], a_name: str, b_name: str) -> Dict[str, Any]:
+def build_corner_recos(a_c: Dict[str, Any], b_c: Dict[str, Any]) -> Dict[str, Any]:
     min_used = min(a_c.get("matches_used", 0), b_c.get("matches_used", 0))
     total_avg_expected = (a_c.get("total_avg", 0.0) + b_c.get("total_avg", 0.0)) / 2.0
     total_std_expected = (a_c.get("total_std", 0.0) + b_c.get("total_std", 0.0)) / 2.0
-    trend_expected = (a_c.get("trend", 0.0) + b_c.get("trend", 0.0)) / 2.0
 
     reasons = []
     if min_used < 6:
@@ -469,22 +470,12 @@ def build_corner_recos(a_c: Dict[str, Any], b_c: Dict[str, Any], a_name: str, b_
     line_med = _nearest_corner_line(total_avg_expected - 0.3)
     line_aggr = _nearest_corner_line(total_avg_expected + 0.9)
 
-    low1 = _nearest_corner_line(total_avg_expected - 2.2)
-    low2 = _nearest_corner_line(total_avg_expected - 1.7)
-    low3 = _nearest_corner_line(total_avg_expected - 1.2)
-
-    lows = sorted(list({low1, low2, low3, line_prud}), key=lambda x: x)
-
     return {
         "no_bet": no_bet,
         "no_bet_reasons": reasons,
-        "expected_total_avg": total_avg_expected,
-        "expected_total_std": total_std_expected,
-        "expected_trend": trend_expected,
         "prudente": f"Over {line_prud:.1f} Corner",
         "medio": f"Over {line_med:.1f} Corner",
         "aggressivo": f"Over {line_aggr:.1f} Corner",
-        "low_lines": [f"Over {x:.1f} Corner" for x in lows],
     }
 
 
@@ -659,7 +650,7 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
     if btts_yes >= 0.62:
         alt.append(("Goal (BTTS Sì)", f"BTTS Sì ≈ {btts_yes*100:.0f}%."))
     elif btts_yes <= 0.40:
-        alt.append(("No Goal (BTTS No)", f"No Goal più coerente."))
+        alt.append(("No Goal (BTTS No)", "No Goal più coerente."))
     else:
         alt.append(("Goal/NoGoal", "Zona media, da leggere con attenzione."))
 
@@ -701,9 +692,8 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
 # =============================
 
 def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
-    rates = rec["meta"]["rates"]
     probs_1x2 = rec["outright"]["probs"]
-
+    rates = rec["meta"]["rates"]
     return {
         "1": probs_1x2.get("1", 0.0),
         "X": probs_1x2.get("X", 0.0),
@@ -739,7 +729,7 @@ def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) ->
     return rows
 
 
-def model_only_table(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_model_only_table(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     prob_map = market_probability_map(rec)
     rows = []
     for market, prob in prob_map.items():
@@ -755,10 +745,10 @@ def model_only_table(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
-def pick_best_single(value_table: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not value_table:
+def pick_best_single(table: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not table:
         return None
-    return value_table[0]
+    return table[0]
 
 
 def signal_badge(x: float, source: str) -> str:
@@ -786,7 +776,6 @@ def fixture_label(fx: Dict[str, Any]) -> str:
     home = (teams.get("home", {}) or {}).get("name", "Home")
     away = (teams.get("away", {}) or {}).get("name", "Away")
     l_name = league.get("name", "League")
-
     dt = (fx.get("fixture", {}) or {}).get("date", "")
     hhmm = ""
     if dt:
@@ -815,24 +804,25 @@ def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Opt
 
     a_corner = compute_team_corner_profile(api_key, home_id, season, last_n=10)
     b_corner = compute_team_corner_profile(api_key, away_id, season, last_n=10)
-    corner_reco = build_corner_recos(a_corner, b_corner, home_name, away_name)
+    corner_reco = build_corner_recos(a_corner, b_corner)
 
     bookmaker_used = "Nessuna quota"
     odds_map: Dict[str, float] = {}
+    odds_debug: Dict[str, Any] = {}
 
     if pick.fixture:
         fixture_id = (pick.fixture.get("fixture", {}) or {}).get("id")
         if fixture_id:
-            odds_resp = get_fixture_odds(api_key, int(fixture_id))
+            odds_debug = debug_fixture_odds(api_key, int(fixture_id))
+            odds_resp = odds_debug.get("response", []) or []
             bookmaker_item, bookmaker_used = choose_bookmaker_from_odds(odds_resp)
             if bookmaker_item:
                 odds_map = extract_market_odds_from_bookmaker(bookmaker_item)
 
-    prob_map = market_probability_map(rec)
     if odds_map:
-        value_table = build_value_table(prob_map, odds_map)
+        value_table = build_value_table(market_probability_map(rec), odds_map)
     else:
-        value_table = model_only_table(rec)
+        value_table = build_model_only_table(rec)
 
     best_single = pick_best_single(value_table)
 
@@ -851,6 +841,7 @@ def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Opt
         "bookmaker_used": bookmaker_used,
         "value_table": value_table,
         "best_single": best_single,
+        "odds_debug": odds_debug,
     }
 
 
@@ -966,10 +957,25 @@ api_football_key = secrets_keys.get("API_FOOTBALL_KEY", "")
 
 with st.expander("🔧 DEBUG (solo se serve)", expanded=False):
     st.json({k: ("***" if "KEY" in k else v) for k, v in secrets_keys.items()})
+
     if api_football_key:
         st.write(f"API_FOOTBALL_KEY presente (lunghezza {len(api_football_key)}).")
     else:
         st.warning("API_FOOTBALL_KEY NON trovata nei Secrets.")
+
+    st.markdown("### Debug bookmakers")
+    try:
+        books = get_odds_bookmakers(api_football_key)
+        st.write("Numero bookmakers trovati:", len(books))
+        if books:
+            st.dataframe(
+                [{"id": b.get("id"), "name": b.get("name")} for b in books[:50]],
+                use_container_width=True
+            )
+        else:
+            st.warning("Nessun bookmaker trovato dalla API.")
+    except Exception as e:
+        st.error(f"Errore nel caricamento bookmakers: {e}")
 
 if not api_football_key:
     st.error("Manca API_FOOTBALL_KEY nei Secrets.")
@@ -992,6 +998,7 @@ def render_analysis(res: Dict[str, Any]):
     value_table = res.get("value_table", [])
     bookmaker_used = res.get("bookmaker_used", "N/D")
     odds_map = res.get("odds_map", {})
+    odds_debug = res.get("odds_debug", {})
 
     st.success("✅ Analisi pronta")
 
@@ -1005,6 +1012,21 @@ def render_analysis(res: Dict[str, Any]):
 """,
         unsafe_allow_html=True,
     )
+
+    if pick.fixture:
+        fixture_id = (pick.fixture.get("fixture", {}) or {}).get("id")
+        if fixture_id:
+            with st.expander("DEBUG QUOTE FIXTURE", expanded=False):
+                st.write("Fixture ID:", fixture_id)
+                st.write("HTTP status:", odds_debug.get("_http_status"))
+                st.write("URL:", odds_debug.get("_url"))
+                st.write("Numero righe response:", len(odds_debug.get("response", []) or []))
+                if odds_debug.get("errors"):
+                    st.write("Errors:", odds_debug.get("errors"))
+                else:
+                    st.write("Errors: nessuno")
+                if odds_debug.get("response"):
+                    st.json((odds_debug.get("response", []) or [])[:1])
 
     c1, c2 = st.columns(2)
 
@@ -1070,7 +1092,7 @@ def render_analysis(res: Dict[str, Any]):
         st.dataframe(rows, use_container_width=True)
 
     st.markdown("## 🎯 Corner")
-    if not corner_reco or corner_reco.get("expected_total_avg", 0.0) <= 0:
+    if not corner_reco or corner_reco.get("prudente") is None:
         st.info("Corner non disponibili.")
     else:
         if corner_reco.get("no_bet"):
@@ -1079,9 +1101,6 @@ def render_analysis(res: Dict[str, Any]):
             st.write(f"Prudente: **{corner_reco['prudente']}**")
             st.write(f"Medio: **{corner_reco['medio']}**")
             st.write(f"Aggressivo: **{corner_reco['aggressivo']}**")
-            lows = corner_reco.get("low_lines", [])
-            if lows:
-                st.write("Linee basse:", " · ".join(lows[:6]))
 
 
 with tabs[0]:
