@@ -258,7 +258,7 @@ def get_the_odds_api_events(
     sport_key: str,
     event_date: str,
     regions: str = "eu",
-    markets: str = "h2h,totals",
+    markets: str = "h2h,totals,btts",
     odds_format: str = "decimal",
     date_format: str = "iso",
 ) -> List[Dict[str, Any]]:
@@ -315,7 +315,7 @@ def extract_odds_from_the_odds_event(event: Dict[str, Any]) -> Tuple[Dict[str, f
     away_team = event.get("away_team", "")
 
     for market in bookmaker.get("markets", []) or []:
-        mkey = market.get("key")
+        mkey = (market.get("key") or "").strip().lower()
 
         if mkey == "h2h":
             draw_price = None
@@ -344,9 +344,25 @@ def extract_odds_from_the_odds_event(event: Dict[str, Any]) -> Tuple[Dict[str, f
             if away_price:
                 odds_map["2"] = away_price
 
+        elif mkey in {"double_chance", "double chance"}:
+            for o in market.get("outcomes", []) or []:
+                name = norm_text(o.get("name", ""))
+                price = o.get("price")
+                try:
+                    price = float(price)
+                except Exception:
+                    continue
+
+                if name in {"1x", "home or draw", "home/draw"}:
+                    odds_map["1X"] = price
+                elif name in {"x2", "draw or away", "draw/away"}:
+                    odds_map["X2"] = price
+                elif name in {"12", "home or away", "home/away"}:
+                    odds_map["12"] = price
+
         elif mkey == "totals":
             for o in market.get("outcomes", []) or []:
-                name = o.get("name", "")
+                name = norm_text(o.get("name", ""))
                 point = o.get("point")
                 price = o.get("price")
                 try:
@@ -357,11 +373,26 @@ def extract_odds_from_the_odds_event(event: Dict[str, Any]) -> Tuple[Dict[str, f
                 if point is None:
                     continue
 
-                if str(point) in {"1.5", "2.5", "3.5", "4.5", "5.5"}:
-                    if norm_text(name) == "over":
-                        odds_map[f"Over {point}"] = price
-                    elif norm_text(name) == "under":
-                        odds_map[f"Under {point}"] = price
+                point_str = str(point)
+                if point_str in {"1.5", "2.5", "3.5", "4.5", "5.5"}:
+                    if name == "over":
+                        odds_map[f"Over {point_str}"] = price
+                    elif name == "under":
+                        odds_map[f"Under {point_str}"] = price
+
+        elif mkey == "btts":
+            for o in market.get("outcomes", []) or []:
+                name = norm_text(o.get("name", ""))
+                price = o.get("price")
+                try:
+                    price = float(price)
+                except Exception:
+                    continue
+
+                if name == "yes":
+                    odds_map["Goal (BTTS Sì)"] = price
+                elif name == "no":
+                    odds_map["No Goal (BTTS No)"] = price
 
     return odds_map, bookmaker_name
 
@@ -393,7 +424,7 @@ def find_odds_for_match(
         sport_key=sport_key,
         event_date=match_date,
         regions="eu",
-        markets="h2h,totals",
+        markets="h2h,totals,btts",
         odds_format="decimal",
         date_format="iso",
     )
@@ -648,14 +679,29 @@ def market_rates_from_summary(s: Dict[str, Any]) -> Dict[str, float]:
     totals = s.get("totals", []) or []
     btts = s.get("btts", []) or []
     n = len(totals)
+
     if n == 0:
-        return {"o15": 0.0, "o25": 0.0, "o35": 0.0, "u35": 0.0, "u45": 0.0, "btts_yes": 0.0}
+        return {
+            "o15": 0.0,
+            "o25": 0.0,
+            "o35": 0.0,
+            "o45": 0.0,
+            "o55": 0.0,
+            "u35": 0.0,
+            "u45": 0.0,
+            "u55": 0.0,
+            "btts_yes": 0.0,
+        }
+
     return {
         "o15": sum(1 for t in totals if t >= 2) / n,
         "o25": sum(1 for t in totals if t >= 3) / n,
         "o35": sum(1 for t in totals if t >= 4) / n,
+        "o45": sum(1 for t in totals if t >= 5) / n,
+        "o55": sum(1 for t in totals if t >= 6) / n,
         "u35": sum(1 for t in totals if t <= 3) / n,
         "u45": sum(1 for t in totals if t <= 4) / n,
+        "u55": sum(1 for t in totals if t <= 5) / n,
         "btts_yes": sum(1 for x in btts if x) / n,
     }
 
@@ -666,9 +712,9 @@ def combine_rates(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
 
 
 def label_risk(market: str) -> str:
-    safe = {"Over 1.5", "Under 4.5", "Under 3.5", "1X", "X2", "12"}
-    medium = {"Over 2.5", "Goal (BTTS Sì)", "No Goal (BTTS No)", "1", "2"}
-    agg = {"Over 3.5", "X"}
+    safe = {"Over 1.5", "Under 4.5", "Under 5.5", "1X", "X2"}
+    medium = {"Under 3.5", "Over 2.5", "Goal (BTTS Sì)", "No Goal (BTTS No)", "1", "2", "12"}
+    agg = {"X", "Over 3.5", "Over 4.5", "Over 5.5"}
     if market in safe:
         return "🟩 Prudente"
     if market in medium:
@@ -804,11 +850,17 @@ def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
         "1": probs_1x2.get("1", 0.0),
         "X": probs_1x2.get("X", 0.0),
         "2": probs_1x2.get("2", 0.0),
+
         "Over 1.5": rates.get("o15", 0.0),
         "Over 2.5": rates.get("o25", 0.0),
         "Over 3.5": rates.get("o35", 0.0),
+        "Over 4.5": rates.get("o45", 0.0),
+        "Over 5.5": rates.get("o55", 0.0),
+
         "Under 3.5": rates.get("u35", 0.0),
         "Under 4.5": rates.get("u45", 0.0),
+        "Under 5.5": rates.get("u55", 0.0),
+
         "Goal (BTTS Sì)": rates.get("btts_yes", 0.0),
         "No Goal (BTTS No)": 1.0 - rates.get("btts_yes", 0.0),
     }
@@ -820,13 +872,154 @@ def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
     return out
 
 
+MARKET_PROFILES = {
+    "1": {"min_prob": 0.52, "min_odd": 1.35, "max_odd": 3.10, "target_odd": 1.85, "stability": 0.78},
+    "X": {"min_prob": 0.28, "min_odd": 2.90, "max_odd": 4.60, "target_odd": 3.40, "stability": 0.40},
+    "2": {"min_prob": 0.52, "min_odd": 1.35, "max_odd": 3.10, "target_odd": 1.85, "stability": 0.78},
+
+    "1X": {"min_prob": 0.72, "min_odd": 1.18, "max_odd": 1.95, "target_odd": 1.42, "stability": 0.95},
+    "X2": {"min_prob": 0.72, "min_odd": 1.18, "max_odd": 1.95, "target_odd": 1.42, "stability": 0.95},
+    "12": {"min_prob": 0.68, "min_odd": 1.20, "max_odd": 1.95, "target_odd": 1.38, "stability": 0.70},
+
+    "Over 1.5": {"min_prob": 0.72, "min_odd": 1.18, "max_odd": 1.90, "target_odd": 1.42, "stability": 1.00},
+    "Over 2.5": {"min_prob": 0.56, "min_odd": 1.45, "max_odd": 2.35, "target_odd": 1.82, "stability": 0.86},
+    "Over 3.5": {"min_prob": 0.42, "min_odd": 1.85, "max_odd": 3.20, "target_odd": 2.35, "stability": 0.62},
+    "Over 4.5": {"min_prob": 0.28, "min_odd": 2.40, "max_odd": 5.00, "target_odd": 3.50, "stability": 0.35},
+    "Over 5.5": {"min_prob": 0.18, "min_odd": 3.40, "max_odd": 7.00, "target_odd": 4.60, "stability": 0.18},
+
+    "Under 3.5": {"min_prob": 0.62, "min_odd": 1.28, "max_odd": 2.30, "target_odd": 1.68, "stability": 0.92},
+    "Under 4.5": {"min_prob": 0.76, "min_odd": 1.15, "max_odd": 1.85, "target_odd": 1.38, "stability": 1.00},
+    "Under 5.5": {"min_prob": 0.84, "min_odd": 1.08, "max_odd": 1.55, "target_odd": 1.22, "stability": 0.96},
+
+    "Goal (BTTS Sì)": {"min_prob": 0.56, "min_odd": 1.45, "max_odd": 2.30, "target_odd": 1.78, "stability": 0.78},
+    "No Goal (BTTS No)": {"min_prob": 0.56, "min_odd": 1.45, "max_odd": 2.30, "target_odd": 1.78, "stability": 0.78},
+}
+
+
+def get_match_context(prob_map: Dict[str, float]) -> Dict[str, Any]:
+    p1 = prob_map.get("1", 0.0)
+    px = prob_map.get("X", 0.0)
+    p2 = prob_map.get("2", 0.0)
+
+    if p1 - p2 >= 0.14:
+        side = "home"
+    elif p2 - p1 >= 0.14:
+        side = "away"
+    else:
+        side = "balanced"
+
+    if prob_map.get("Over 2.5", 0.0) >= 0.62:
+        goals_profile = "high"
+    elif prob_map.get("Under 4.5", 0.0) >= 0.82 and prob_map.get("Under 3.5", 0.0) >= 0.58:
+        goals_profile = "low"
+    else:
+        goals_profile = "mid"
+
+    return {
+        "side": side,
+        "goals_profile": goals_profile,
+        "p1": p1,
+        "px": px,
+        "p2": p2,
+    }
+
+
+def context_bonus_for_market(market: str, ctx: Dict[str, Any]) -> float:
+    bonus = 0.0
+    side = ctx["side"]
+    goals_profile = ctx["goals_profile"]
+
+    if side == "home":
+        if market in {"1", "1X"}:
+            bonus += 10.0
+        if market in {"2", "X2"}:
+            bonus -= 10.0
+        if market == "X":
+            bonus -= 4.0
+
+    elif side == "away":
+        if market in {"2", "X2"}:
+            bonus += 10.0
+        if market in {"1", "1X"}:
+            bonus -= 10.0
+        if market == "X":
+            bonus -= 4.0
+
+    else:
+        if market in {"X", "12", "Under 3.5"}:
+            bonus += 6.0
+
+    if goals_profile == "high":
+        if market in {"Over 1.5", "Over 2.5", "Goal (BTTS Sì)"}:
+            bonus += 8.0
+        if market in {"Under 3.5", "Under 4.5", "No Goal (BTTS No)"}:
+            bonus -= 6.0
+
+    elif goals_profile == "low":
+        if market in {"Under 3.5", "Under 4.5", "Under 5.5", "No Goal (BTTS No)"}:
+            bonus += 8.0
+        if market in {"Over 3.5", "Over 4.5", "Over 5.5"}:
+            bonus -= 10.0
+
+    return bonus
+
+
+def score_market_candidate(market: str, prob: float, odd: float, prob_map: Dict[str, float], relaxed: bool = False) -> Optional[float]:
+    profile = MARKET_PROFILES.get(market)
+    if not profile:
+        return None
+
+    min_prob = profile["min_prob"] - (0.05 if relaxed else 0.0)
+    max_odd = profile["max_odd"] + (0.50 if relaxed else 0.0)
+    min_odd = profile["min_odd"]
+    target_odd = profile["target_odd"]
+    stability = profile["stability"]
+
+    if prob < min_prob:
+        return None
+    if odd < min_odd or odd > max_odd:
+        return None
+
+    edge = prob * odd
+    min_edge = 0.88 if relaxed else 0.93
+    if edge < min_edge:
+        return None
+
+    prob_score = prob * 100.0 * stability
+    edge_bonus = max(0.0, edge - 1.0) * 32.0
+
+    odds_span = max_odd - min_odd
+    if odds_span <= 0:
+        target_bonus = 0.0
+    else:
+        target_bonus = max(0.0, 1.0 - abs(odd - target_odd) / odds_span) * 10.0
+
+    ctx = get_match_context(prob_map)
+    ctx_bonus = context_bonus_for_market(market, ctx)
+
+    longshot_penalty = 0.0
+    if odd >= 5.5:
+        longshot_penalty += 18.0
+    elif odd >= 4.2:
+        longshot_penalty += 10.0
+    elif odd >= 3.4:
+        longshot_penalty += 4.0
+
+    if market == "X":
+        longshot_penalty += 5.0
+
+    final_score = prob_score + edge_bonus + target_bonus + ctx_bonus - longshot_penalty
+    return final_score
+
+
 def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) -> List[Dict[str, Any]]:
     rows = []
 
     allowed_markets = {
         "1", "X", "2",
-        "Over 1.5", "Over 2.5", "Over 3.5",
-        "Under 3.5", "Under 4.5",
+        "1X", "X2", "12",
+        "Over 1.5", "Over 2.5", "Over 3.5", "Over 4.5", "Over 5.5",
+        "Under 3.5", "Under 4.5", "Under 5.5",
         "Goal (BTTS Sì)", "No Goal (BTTS No)"
     }
 
@@ -835,27 +1028,47 @@ def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) ->
             continue
 
         odd = odds_map.get(market)
-        if odd is None or odd <= 1.0:
+        if odd is None:
             continue
 
-        if prob < 0.42:
+        score = score_market_candidate(market, prob, odd, prob_map, relaxed=False)
+        if score is None:
             continue
-
-        if odd > 6.50:
-            continue
-
-        value_idx = (prob ** 1.35) * (odd ** 0.65)
 
         rows.append(
             {
                 "market": market,
                 "prob": prob,
                 "odd": odd,
-                "value_idx": value_idx,
+                "value_idx": score,
                 "risk": label_risk(market),
                 "source": "quota",
             }
         )
+
+    if not rows:
+        for market, prob in prob_map.items():
+            if market not in allowed_markets:
+                continue
+
+            odd = odds_map.get(market)
+            if odd is None:
+                continue
+
+            score = score_market_candidate(market, prob, odd, prob_map, relaxed=True)
+            if score is None:
+                continue
+
+            rows.append(
+                {
+                    "market": market,
+                    "prob": prob,
+                    "odd": odd,
+                    "value_idx": score,
+                    "risk": label_risk(market),
+                    "source": "quota",
+                }
+            )
 
     rows.sort(key=lambda x: x["value_idx"], reverse=True)
     return rows
@@ -863,18 +1076,28 @@ def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) ->
 
 def build_model_only_table(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     prob_map = market_probability_map(rec)
+
     rows = []
     for market, prob in prob_map.items():
+        bonus = 0.0
+        if market in {"Over 1.5", "Under 4.5", "Under 5.5", "1X", "X2"}:
+            bonus += 8.0
+        elif market in {"Under 3.5", "Over 2.5", "Goal (BTTS Sì)", "No Goal (BTTS No)", "1", "2"}:
+            bonus += 4.0
+
+        value_idx = prob * 100.0 + bonus
+
         rows.append(
             {
                 "market": market,
                 "prob": prob,
                 "odd": None,
-                "value_idx": prob,
+                "value_idx": value_idx,
                 "risk": label_risk(market),
                 "source": "modello",
             }
         )
+
     rows.sort(key=lambda x: x["value_idx"], reverse=True)
     return rows
 
@@ -882,65 +1105,20 @@ def build_model_only_table(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
 def pick_best_single(table: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not table:
         return None
-
-    preferred_order = {
-        "Over 1.5": 1,
-        "Under 4.5": 2,
-        "Under 3.5": 3,
-        "Over 2.5": 4,
-        "Goal (BTTS Sì)": 5,
-        "No Goal (BTTS No)": 6,
-        "1": 7,
-        "2": 8,
-        "X": 9,
-        "Over 3.5": 10,
-    }
-
-    top = table[:5]
-
-    def final_score(row):
-        prob = row["prob"]
-        odd = row["odd"]
-        market = row["market"]
-
-        bonus = 0.0
-
-        if market in {"Over 1.5", "Under 4.5", "Under 3.5"}:
-            bonus += 0.12
-        elif market in {"Over 2.5", "Goal (BTTS Sì)", "No Goal (BTTS No)"}:
-            bonus += 0.06
-
-        if odd >= 4.50:
-            bonus -= 0.12
-        elif odd >= 3.50:
-            bonus -= 0.06
-
-        if prob >= 0.70:
-            bonus += 0.10
-        elif prob >= 0.60:
-            bonus += 0.05
-
-        score = row["value_idx"] + bonus
-        rank_bonus = (20 - preferred_order.get(market, 20)) * 0.001
-        score += rank_bonus
-
-        return score
-
-    best = sorted(top, key=final_score, reverse=True)[0]
-    return best
+    return table[0]
 
 
 def signal_badge(x: float, source: str) -> str:
     if source == "quota":
-        if x >= 1.18:
-            return "🔵 Valore molto alto"
-        if x >= 1.05:
-            return "🟣 Valore buono"
-        return "🟠 Valore basso"
+        if x >= 78:
+            return "🔵 Molto buona"
+        if x >= 68:
+            return "🟣 Buona"
+        return "🟠 Da valutare"
     else:
-        if x >= 0.72:
+        if x >= 72:
             return "🔵 Forte dal modello"
-        if x >= 0.60:
+        if x >= 60:
             return "🟣 Buona dal modello"
         return "🟠 Debole dal modello"
 
@@ -1253,11 +1431,13 @@ def render_analysis(res: Dict[str, Any]):
     if odds_map:
         st.markdown("## 💰 Quote trovate")
         st.dataframe([{"Mercato": k, "Quota": v} for k, v in odds_map.items()], use_container_width=True)
+    else:
+        st.info("Quote non trovate per questo match. Uso il fallback del modello.")
 
     st.markdown("## 📈 Classifica mercati")
     if value_table:
         rows = []
-        for r in value_table[:10]:
+        for r in value_table[:15]:
             rows.append(
                 {
                     "Mercato": r["market"],
@@ -1333,7 +1513,7 @@ with tabs[0]:
 
                     ranked: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
 
-                    for fx in all_fx[:40]:
+                    for fx in all_fx[:60]:
                         teams = fx.get("teams", {}) or {}
                         league = fx.get("league", {}) or {}
                         home = teams.get("home", {}) or {}
@@ -1373,7 +1553,7 @@ with tabs[0]:
         if ranked:
             st.markdown("## ⭐ Migliori giocate del giorno")
             rows_rank = []
-            for score, fx, result in ranked:
+            for _, fx, result in ranked:
                 teams = fx.get("teams", {}) or {}
                 home = (teams.get("home", {}) or {}).get("name", "Home")
                 away = (teams.get("away", {}) or {}).get("name", "Away")
@@ -1381,12 +1561,12 @@ with tabs[0]:
                 rows_rank.append(
                     {
                         "Partita": f"{home} - {away}",
+                        "Giocata": best.get("market", "-"),
                         "Quota": "-" if best.get("odd") is None else f"{best.get('odd'):.2f}",
                         "Prob.": f"{best.get('prob', 0.0)*100:.0f}%",
-                        "Indice": f"{score:.2f}",
+                        "Indice": f"{best.get('value_idx', 0.0):.2f}",
                         "Origine": best.get("source", "-"),
                         "Bookmaker": result.get("bookmaker_used", "N/D"),
-                        "Giocata": best.get("market", "-"),
                     }
                 )
             st.dataframe(rows_rank, use_container_width=True)
