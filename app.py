@@ -251,13 +251,11 @@ def find_fixture_smart(
 # =========================================================
 # THE ODDS API
 # =========================================================
-
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def get_the_odds_api_events(
     odds_api_key: str,
     sport_key: str,
-    event_date: str,
-    regions: str = "eu",
+    regions: str = "eu,uk",
     markets: str = "h2h,totals,btts",
     odds_format: str = "decimal",
     date_format: str = "iso",
@@ -278,6 +276,9 @@ def get_the_odds_api_events(
         data = r.json()
         if not isinstance(data, list):
             return []
+        return data
+    except Exception:
+        return []
 
         out = []
         for ev in data:
@@ -396,7 +397,6 @@ def extract_odds_from_the_odds_event(event: Dict[str, Any]) -> Tuple[Dict[str, f
 
     return odds_map, bookmaker_name
 
-
 def find_odds_for_match(
     odds_api_key: str,
     league_id: Optional[int],
@@ -410,7 +410,7 @@ def find_odds_for_match(
         "matched_event": None,
     }
 
-    if not odds_api_key or not league_id or not match_date:
+    if not odds_api_key or not league_id:
         return {}, "ODDS API non configurata", debug
 
     sport_key = ODDS_SPORT_KEYS.get(league_id)
@@ -422,8 +422,7 @@ def find_odds_for_match(
     events = get_the_odds_api_events(
         odds_api_key=odds_api_key,
         sport_key=sport_key,
-        event_date=match_date,
-        regions="eu",
+        regions="eu,uk",
         markets="h2h,totals,btts",
         odds_format="decimal",
         date_format="iso",
@@ -434,25 +433,48 @@ def find_odds_for_match(
         return {}, "Nessun evento The Odds API", debug
 
     best_event = None
-    best_score = 0.0
+    best_score = -9999.0
+
+    target_dt = None
+    if match_date:
+        try:
+            target_dt = datetime.strptime(match_date, "%Y-%m-%d").date()
+        except Exception:
+            target_dt = None
 
     for ev in events:
-        home_ev = ev.get("home_team", "")
-        away_ev = ev.get("away_team", "")
-        s1 = similarity(home_name, home_ev)
-        s2 = similarity(away_name, away_ev)
-        score_direct = (s1 + s2) / 2.0
+        home_ev = ev.get("home_team", "") or ""
+        away_ev = ev.get("away_team", "") or ""
 
-        s3 = similarity(home_name, away_ev)
-        s4 = similarity(away_name, home_ev)
-        score_swapped = (s3 + s4) / 2.0
+        s_direct = (similarity(home_name, home_ev) + similarity(away_name, away_ev)) / 2.0
+        s_swapped = (similarity(home_name, away_ev) + similarity(away_name, home_ev)) / 2.0
+        team_score = max(s_direct, s_swapped)
 
-        score = max(score_direct, score_swapped)
+        # bonus/malus sulla data, ma senza bloccare tutto
+        date_bonus = 0.0
+        ev_date_str = (ev.get("commence_time") or "")[:10]
+        if target_dt and ev_date_str:
+            try:
+                ev_dt = datetime.strptime(ev_date_str, "%Y-%m-%d").date()
+                diff_days = abs((ev_dt - target_dt).days)
+                if diff_days == 0:
+                    date_bonus = 0.20
+                elif diff_days == 1:
+                    date_bonus = 0.08
+                elif diff_days == 2:
+                    date_bonus = -0.05
+                else:
+                    date_bonus = -0.20
+            except Exception:
+                pass
+
+        score = team_score + date_bonus
+
         if score > best_score:
             best_score = score
             best_event = ev
 
-    if not best_event or best_score < 0.60:
+    if not best_event or best_score < 0.62:
         return {}, "Match quote non trovato", debug
 
     debug["matched_event"] = {
