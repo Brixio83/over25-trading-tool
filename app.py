@@ -11,9 +11,13 @@
 #    - Preferenza NetBet, fallback automatico se non disponibile
 #    - Miglior giocata partita
 #    - Migliori giocate del giorno
+#
+# --- STREAMLIT SECRETS ---
+# API_FOOTBALL_KEY = "la_tua_key_api_football"
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -42,7 +46,6 @@ DEFAULT_LEAGUES: Dict[str, int] = {
     "Conference League": 848,
 }
 
-# bookmaker preferiti se NetBet non c'è
 FALLBACK_BOOKMAKERS = [
     "Netbet",
     "Bet365",
@@ -166,7 +169,16 @@ def get_injuries(api_key: str, team_id: int, season: int, league_id: Optional[in
 
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def get_fixtures_by_date_and_league(api_key: str, day: str, league_id: int) -> List[Dict[str, Any]]:
-    season = season_for_date(now_utc())
+    """
+    day: YYYY-MM-DD
+    Usa la stagione calcolata dalla data scelta, non da now_utc()
+    """
+    try:
+        dt = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        season = season_for_date(dt)
+    except Exception:
+        season = season_for_date(now_utc())
+
     url = f"{API_FOOTBALL_BASE}/fixtures"
     params = {"date": day, "league": league_id, "season": season}
     data = http_get_json(url, api_football_headers(api_key), params)
@@ -182,9 +194,6 @@ def get_odds_bookmakers(api_key: str) -> List[Dict[str, Any]]:
 
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def get_fixture_odds(api_key: str, fixture_id: int) -> List[Dict[str, Any]]:
-    """
-    Ritorna tutte le quote bookmaker per il fixture.
-    """
     url = f"{API_FOOTBALL_BASE}/odds"
     data = http_get_json(url, api_football_headers(api_key), {"fixture": fixture_id})
     return data.get("response", []) or []
@@ -259,9 +268,6 @@ def normalize_value_label(v: str) -> str:
 
 
 def choose_bookmaker_from_odds(odds_response: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
-    """
-    Prova NetBet, altrimenti bookmaker fallback.
-    """
     candidates = []
     for item in odds_response:
         book = item.get("bookmaker", {}) or {}
@@ -272,13 +278,11 @@ def choose_bookmaker_from_odds(odds_response: List[Dict[str, Any]]) -> Tuple[Opt
     if not candidates:
         return None, "Nessun bookmaker disponibile"
 
-    # preferisci NetBet
     for item in candidates:
         name = normalize_bookmaker_name((item.get("bookmaker", {}) or {}).get("name", ""))
         if "netbet" in name:
             return item, (item.get("bookmaker", {}) or {}).get("name", "NetBet")
 
-    # fallback
     for pref in FALLBACK_BOOKMAKERS:
         pref_n = pref.lower()
         for item in candidates:
@@ -286,30 +290,11 @@ def choose_bookmaker_from_odds(odds_response: List[Dict[str, Any]]) -> Tuple[Opt
             if pref_n in name:
                 return item, (item.get("bookmaker", {}) or {}).get("name", pref)
 
-    # ultimo fallback: primo disponibile
     first = candidates[0]
     return first, (first.get("bookmaker", {}) or {}).get("name", "Bookmaker")
 
 
 def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[str, float]:
-    """
-    Estrae i mercati principali in un formato unico:
-    {
-      "1": 1.90,
-      "X": 3.20,
-      "2": 4.10,
-      "1X": 1.25,
-      "X2": 1.65,
-      "12": 1.33,
-      "Over 1.5": 1.22,
-      "Over 2.5": 1.82,
-      "Over 3.5": 2.95,
-      "Under 3.5": 1.35,
-      "Under 4.5": 1.18,
-      "Goal (BTTS Sì)": 1.80,
-      "No Goal (BTTS No)": 1.90
-    }
-    """
     out: Dict[str, float] = {}
     bets = bookmaker_item.get("bets", []) or []
 
@@ -317,7 +302,6 @@ def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[s
         bet_name = normalize_bet_label(bet.get("name", ""))
         values = bet.get("values", []) or []
 
-        # 1X2
         if bet_name in {"match winner", "winner", "match result"}:
             for v in values:
                 label = normalize_value_label(v.get("value", ""))
@@ -334,7 +318,6 @@ def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[s
                 elif label in {"away", "2"}:
                     out["2"] = odd_f
 
-        # double chance
         elif bet_name in {"double chance"}:
             for v in values:
                 label = normalize_value_label(v.get("value", ""))
@@ -351,7 +334,6 @@ def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[s
                 elif label in {"home/away", "12"}:
                     out["12"] = odd_f
 
-        # over/under goals
         elif "goals over/under" in bet_name or "over/under" in bet_name:
             for v in values:
                 label = normalize_value_label(v.get("value", ""))
@@ -361,7 +343,6 @@ def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[s
                 except Exception:
                     continue
 
-                # esempi: over 1.5 / under 3.5
                 if label.startswith("over "):
                     raw = label.replace("over ", "").strip()
                     if raw in {"1.5", "2.5", "3.5", "4.5", "5.5"}:
@@ -371,7 +352,6 @@ def extract_market_odds_from_bookmaker(bookmaker_item: Dict[str, Any]) -> Dict[s
                     if raw in {"1.5", "2.5", "3.5", "4.5", "5.5"}:
                         out[f"Under {raw}"] = odd_f
 
-        # BTTS
         elif bet_name in {"both teams score", "both teams to score"}:
             for v in values:
                 label = normalize_value_label(v.get("value", ""))
@@ -683,8 +663,8 @@ def recommend_outright_1x2(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -
     draw_base = 0.24 + max(0.0, 0.10 - abs(diff) * 0.05) + max(0.0, (2.6 - avg_goals) * 0.05)
     draw_base = clamp(draw_base, 0.18, 0.38)
 
-    home_raw = pow(2.71828, diff * 0.9)
-    away_raw = pow(2.71828, -diff * 0.9)
+    home_raw = math.exp(diff * 0.9)
+    away_raw = math.exp(-diff * 0.9)
 
     rest = max(0.02, 1.0 - draw_base)
     p1 = rest * home_raw / (home_raw + away_raw)
@@ -786,7 +766,7 @@ def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
     outright = rec.get("outright", {})
     probs_1x2 = outright.get("probs", {"1": 0.0, "X": 0.0, "2": 0.0})
 
-    out = {
+    return {
         "1": probs_1x2.get("1", 0.0),
         "X": probs_1x2.get("X", 0.0),
         "2": probs_1x2.get("2", 0.0),
@@ -801,7 +781,6 @@ def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
         "Goal (BTTS Sì)": rates.get("btts_yes", 0.0),
         "No Goal (BTTS No)": 1.0 - rates.get("btts_yes", 0.0),
     }
-    return out
 
 
 def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) -> List[Dict[str, Any]]:
@@ -889,7 +868,7 @@ def signal_badge(x: float) -> str:
 
 
 # =============================
-# TOP 10 DEL GIORNO
+# HELPERS UI
 # =============================
 
 def fixture_label(fx: Dict[str, Any]) -> str:
@@ -929,7 +908,6 @@ def analyze_by_team_ids(api_key: str, home_id: int, away_id: int, league_id: Opt
     b_corner = compute_team_corner_profile(api_key, int(away_id), season, last_n=10)
     corner_reco = build_corner_recos(a_corner, b_corner, home_name, away_name)
 
-    # odds
     odds_map = {}
     bookmaker_used = "N/D"
     if pick.fixture:
@@ -1320,7 +1298,6 @@ with tabs[0]:
 
     mode_tabs = st.tabs(["🗓️ Partite del giorno (max 10)", "✍️ Inserisci partita manualmente"])
 
-    # ====== MODE 1: Partite del giorno ======
     with mode_tabs[0]:
         st.markdown("### 🗓️ Partite del giorno")
         st.caption("Include anche Champions League ed Europa League (se ci sono match quel giorno).")
@@ -1351,20 +1328,29 @@ with tabs[0]:
             else:
                 with st.spinner("Carico le partite e preparo la short-list..."):
                     day_str = day_pick.isoformat()
-                    season = season_for_date(now_utc())
 
                     all_fx: List[Dict[str, Any]] = []
+                    debug_counts = []
+
                     for lname in selected_leagues:
                         lid = DEFAULT_LEAGUES[lname]
                         fx = get_fixtures_by_date_and_league(api_football_key, day_str, lid)
+
+                        debug_counts.append({
+                            "lega": lname,
+                            "league_id": lid,
+                            "trovate_api": len(fx),
+                        })
+
                         for f in fx:
                             status = (((f.get("fixture", {}) or {}).get("status", {}) or {}).get("short")) or ""
                             if status in {"FT", "AET", "PEN", "CANC", "PST", "ABD"}:
                                 continue
                             all_fx.append(f)
 
-                    all_fx = all_fx[:40]
+                    st.session_state["debug_counts"] = debug_counts
 
+                    all_fx = all_fx[:40]
                     ranked: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
 
                     for fx in all_fx:
@@ -1400,6 +1386,11 @@ with tabs[0]:
                     st.session_state["day_choice_idx"] = 0
                     st.session_state["last_analysis_result"] = None
                     st.session_state["last_analysis_source"] = None
+
+        dbg = st.session_state.get("debug_counts", [])
+        if dbg:
+            st.write("Debug leghe:")
+            st.dataframe(dbg, use_container_width=True)
 
         ranked = st.session_state.get("day_ranked", [])
 
@@ -1440,7 +1431,6 @@ with tabs[0]:
             if res and st.session_state.get("last_analysis_source") == "day":
                 render_analysis(res)
 
-    # ====== MODE 2: Inserimento manuale ======
     with mode_tabs[1]:
         st.markdown("### ✍️ Inserisci partita manualmente")
 
