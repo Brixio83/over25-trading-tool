@@ -251,15 +251,16 @@ def find_fixture_smart(
 # =========================================================
 # THE ODDS API
 # =========================================================
-@st.cache_data(ttl=60 * 10, show_spinner=False)
+
+@st.cache_data(ttl=60 * 5, show_spinner=False)
 def get_the_odds_api_events(
     odds_api_key: str,
     sport_key: str,
     regions: str = "eu,uk",
-    markets: str = "h2h,totals,btts",
+    markets: str = "h2h",
     odds_format: str = "decimal",
     date_format: str = "iso",
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     url = f"{THE_ODDS_API_BASE}/sports/{sport_key}/odds"
     params = {
         "apiKey": odds_api_key,
@@ -269,25 +270,31 @@ def get_the_odds_api_events(
         "dateFormat": date_format,
     }
 
+    debug = {
+        "url": url,
+        "params": params.copy(),
+        "status_code": None,
+        "text_preview": "",
+        "count": 0,
+    }
+
     try:
-        r = requests.get(url, params=params, timeout=20)
+        r = requests.get(url, params=params, timeout=25)
+        debug["status_code"] = r.status_code
+        debug["text_preview"] = r.text[:500]
+
         if r.status_code != 200:
-            return []
+            return [], debug
+
         data = r.json()
         if not isinstance(data, list):
-            return []
-        return data
-    except Exception:
-        return []
+            return [], debug
 
-        out = []
-        for ev in data:
-            ct = (ev.get("commence_time") or "")[:10]
-            if ct == event_date:
-                out.append(ev)
-        return out
-    except Exception:
-        return []
+        debug["count"] = len(data)
+        return data, debug
+    except Exception as e:
+        debug["text_preview"] = str(e)
+        return [], debug
 
 
 def pick_preferred_bookmaker(bookmakers: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -312,38 +319,23 @@ def extract_odds_from_the_odds_event(event: Dict[str, Any]) -> Tuple[Dict[str, f
         return {}, "Nessun bookmaker"
 
     odds_map: Dict[str, float] = {}
-    home_team = event.get("home_team", "")
-    away_team = event.get("away_team", "")
 
     for market in bookmaker.get("markets", []) or []:
         mkey = (market.get("key") or "").strip().lower()
 
         if mkey == "h2h":
-            draw_price = None
-            home_price = None
-            away_price = None
-
             for o in market.get("outcomes", []) or []:
-                name = o.get("name", "")
+                name = norm_text(o.get("name", ""))
                 price = o.get("price")
                 try:
                     price = float(price)
                 except Exception:
                     continue
 
-                if norm_text(name) == norm_text(home_team):
-                    home_price = price
-                elif norm_text(name) == norm_text(away_team):
-                    away_price = price
-                elif norm_text(name) == "draw":
-                    draw_price = price
-
-            if home_price:
-                odds_map["1"] = home_price
-            if draw_price:
-                odds_map["X"] = draw_price
-            if away_price:
-                odds_map["2"] = away_price
+                if name == "draw":
+                    odds_map["X"] = price
+                else:
+                    odds_map[o.get("name", "")] = price
 
         elif mkey in {"double_chance", "double chance"}:
             for o in market.get("outcomes", []) or []:
@@ -397,6 +389,27 @@ def extract_odds_from_the_odds_event(event: Dict[str, Any]) -> Tuple[Dict[str, f
 
     return odds_map, bookmaker_name
 
+
+def normalize_named_odds_map(raw_odds: Dict[str, float], home_name: str, away_name: str) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    home_norm = norm_text(home_name)
+    away_norm = norm_text(away_name)
+
+    for k, v in raw_odds.items():
+        nk = norm_text(k)
+
+        if nk == home_norm:
+            out["1"] = v
+        elif nk == away_norm:
+            out["2"] = v
+        elif k == "X":
+            out["X"] = v
+        else:
+            out[k] = v
+
+    return out
+
+
 def find_odds_for_match(
     odds_api_key: str,
     league_id: Optional[int],
@@ -406,8 +419,15 @@ def find_odds_for_match(
 ) -> Tuple[Dict[str, float], str, Dict[str, Any]]:
     debug = {
         "sport_key": None,
-        "events_found": 0,
-        "matched_event": None,
+        "events_found_h2h": 0,
+        "events_found_totals": 0,
+        "events_found_btts": 0,
+        "matched_event_h2h": None,
+        "matched_event_totals": None,
+        "matched_event_btts": None,
+        "http_h2h": {},
+        "http_totals": {},
+        "http_btts": {},
     }
 
     if not odds_api_key or not league_id:
@@ -419,72 +439,125 @@ def find_odds_for_match(
     if not sport_key:
         return {}, "Sport key non mappata", debug
 
-    events = get_the_odds_api_events(
+    events_h2h, dbg_h2h = get_the_odds_api_events(
         odds_api_key=odds_api_key,
         sport_key=sport_key,
         regions="eu,uk",
-        markets="h2h,totals,btts",
+        markets="h2h",
         odds_format="decimal",
         date_format="iso",
     )
-    debug["events_found"] = len(events)
+    events_totals, dbg_totals = get_the_odds_api_events(
+        odds_api_key=odds_api_key,
+        sport_key=sport_key,
+        regions="eu,uk",
+        markets="totals",
+        odds_format="decimal",
+        date_format="iso",
+    )
+    events_btts, dbg_btts = get_the_odds_api_events(
+        odds_api_key=odds_api_key,
+        sport_key=sport_key,
+        regions="eu,uk",
+        markets="btts",
+        odds_format="decimal",
+        date_format="iso",
+    )
 
-    if not events:
+    debug["http_h2h"] = dbg_h2h
+    debug["http_totals"] = dbg_totals
+    debug["http_btts"] = dbg_btts
+    debug["events_found_h2h"] = len(events_h2h)
+    debug["events_found_totals"] = len(events_totals)
+    debug["events_found_btts"] = len(events_btts)
+
+    def pick_best_event(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not events:
+            return None
+
+        best_event = None
+        best_score = -9999.0
+
+        target_dt = None
+        if match_date:
+            try:
+                target_dt = datetime.strptime(match_date, "%Y-%m-%d").date()
+            except Exception:
+                target_dt = None
+
+        for ev in events:
+            home_ev = ev.get("home_team", "") or ""
+            away_ev = ev.get("away_team", "") or ""
+
+            s_direct = (similarity(home_name, home_ev) + similarity(away_name, away_ev)) / 2.0
+            s_swapped = (similarity(home_name, away_ev) + similarity(away_name, home_ev)) / 2.0
+            team_score = max(s_direct, s_swapped)
+
+            date_bonus = 0.0
+            ev_date_str = (ev.get("commence_time") or "")[:10]
+            if target_dt and ev_date_str:
+                try:
+                    ev_dt = datetime.strptime(ev_date_str, "%Y-%m-%d").date()
+                    diff_days = abs((ev_dt - target_dt).days)
+                    if diff_days == 0:
+                        date_bonus = 0.20
+                    elif diff_days == 1:
+                        date_bonus = 0.08
+                    elif diff_days == 2:
+                        date_bonus = -0.05
+                    else:
+                        date_bonus = -0.20
+                except Exception:
+                    pass
+
+            score = team_score + date_bonus
+            if score > best_score:
+                best_score = score
+                best_event = ev
+
+        if best_score < 0.62:
+            return None
+        return best_event
+
+    best_h2h = pick_best_event(events_h2h)
+    best_totals = pick_best_event(events_totals)
+    best_btts = pick_best_event(events_btts)
+
+    if best_h2h:
+        debug["matched_event_h2h"] = {
+            "home_team": best_h2h.get("home_team"),
+            "away_team": best_h2h.get("away_team"),
+            "commence_time": best_h2h.get("commence_time"),
+        }
+    if best_totals:
+        debug["matched_event_totals"] = {
+            "home_team": best_totals.get("home_team"),
+            "away_team": best_totals.get("away_team"),
+            "commence_time": best_totals.get("commence_time"),
+        }
+    if best_btts:
+        debug["matched_event_btts"] = {
+            "home_team": best_btts.get("home_team"),
+            "away_team": best_btts.get("away_team"),
+            "commence_time": best_btts.get("commence_time"),
+        }
+
+    odds_map: Dict[str, float] = {}
+    bookmaker_name = "Nessun evento The Odds API"
+
+    for best_event in [best_h2h, best_totals, best_btts]:
+        if not best_event:
+            continue
+        partial_map, partial_bookmaker = extract_odds_from_the_odds_event(best_event)
+        partial_map = normalize_named_odds_map(partial_map, home_name, away_name)
+        if partial_map:
+            odds_map.update(partial_map)
+            if bookmaker_name == "Nessun evento The Odds API":
+                bookmaker_name = partial_bookmaker
+
+    if not odds_map:
         return {}, "Nessun evento The Odds API", debug
 
-    best_event = None
-    best_score = -9999.0
-
-    target_dt = None
-    if match_date:
-        try:
-            target_dt = datetime.strptime(match_date, "%Y-%m-%d").date()
-        except Exception:
-            target_dt = None
-
-    for ev in events:
-        home_ev = ev.get("home_team", "") or ""
-        away_ev = ev.get("away_team", "") or ""
-
-        s_direct = (similarity(home_name, home_ev) + similarity(away_name, away_ev)) / 2.0
-        s_swapped = (similarity(home_name, away_ev) + similarity(away_name, home_ev)) / 2.0
-        team_score = max(s_direct, s_swapped)
-
-        # bonus/malus sulla data, ma senza bloccare tutto
-        date_bonus = 0.0
-        ev_date_str = (ev.get("commence_time") or "")[:10]
-        if target_dt and ev_date_str:
-            try:
-                ev_dt = datetime.strptime(ev_date_str, "%Y-%m-%d").date()
-                diff_days = abs((ev_dt - target_dt).days)
-                if diff_days == 0:
-                    date_bonus = 0.20
-                elif diff_days == 1:
-                    date_bonus = 0.08
-                elif diff_days == 2:
-                    date_bonus = -0.05
-                else:
-                    date_bonus = -0.20
-            except Exception:
-                pass
-
-        score = team_score + date_bonus
-
-        if score > best_score:
-            best_score = score
-            best_event = ev
-
-    if not best_event or best_score < 0.62:
-        return {}, "Match quote non trovato", debug
-
-    debug["matched_event"] = {
-        "home_team": best_event.get("home_team"),
-        "away_team": best_event.get("away_team"),
-        "commence_time": best_event.get("commence_time"),
-        "score": round(best_score, 3),
-    }
-
-    odds_map, bookmaker_name = extract_odds_from_the_odds_event(best_event)
     return odds_map, bookmaker_name, debug
 
 
@@ -958,7 +1031,6 @@ def context_bonus_for_market(market: str, ctx: Dict[str, Any]) -> float:
             bonus -= 10.0
         if market == "X":
             bonus -= 4.0
-
     elif side == "away":
         if market in {"2", "X2"}:
             bonus += 10.0
@@ -966,7 +1038,6 @@ def context_bonus_for_market(market: str, ctx: Dict[str, Any]) -> float:
             bonus -= 10.0
         if market == "X":
             bonus -= 4.0
-
     else:
         if market in {"X", "12", "Under 3.5"}:
             bonus += 6.0
@@ -976,7 +1047,6 @@ def context_bonus_for_market(market: str, ctx: Dict[str, Any]) -> float:
             bonus += 8.0
         if market in {"Under 3.5", "Under 4.5", "No Goal (BTTS No)"}:
             bonus -= 6.0
-
     elif goals_profile == "low":
         if market in {"Under 3.5", "Under 4.5", "Under 5.5", "No Goal (BTTS No)"}:
             bonus += 8.0
