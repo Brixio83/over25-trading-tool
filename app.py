@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import streamlit as st
 
+
 # =========================================================
 # CONFIG
 # =========================================================
@@ -56,6 +57,7 @@ PREFERRED_BOOKMAKERS = [
     "1xbet",
     "marathonbet",
 ]
+
 
 # =========================================================
 # UTILS
@@ -873,40 +875,32 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
     r = combine_rates(h_rates, a_rates)
     avg_goals = (home_sum.get("avg_total_goals", 0.0) + away_sum.get("avg_total_goals", 0.0)) / 2.0
 
-    if r["o25"] >= 0.62 and avg_goals >= 2.7:
+    if r["o25"] >= 0.64 and avg_goals >= 2.75:
         primary = ("Over 2.5", f"Trend gol alto: Over 2.5 ≈ {r['o25']*100:.0f}%.")
         alt = [
-            ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%."),
-            ("Over 3.5", f"Over 3.5 ≈ {r['o35']*100:.0f}%."),
-        ]
-    elif r["u35"] >= 0.70 and avg_goals <= 2.4:
-        primary = ("Under 3.5", f"Trend gol basso: Under 3.5 ≈ {r['u35']*100:.0f}%.")
-        alt = [
             ("Over 1.5", f"Over 1.5 ≈ {r['o15']*100:.0f}%."),
-            ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%."),
+            ("Goal (BTTS Sì)", f"BTTS Sì ≈ {r['btts_yes']*100:.0f}%."),
         ]
-    else:
-        primary = ("Over 1.5", f"Zona centrale: Over 1.5 ≈ {r['o15']*100:.0f}%.")
+    elif r["u45"] >= 0.78:
+        primary = ("Under 4.5", f"Trend prudente: Under 4.5 ≈ {r['u45']*100:.0f}%.")
         alt = [
-            ("Over 2.5", f"Over 2.5 ≈ {r['o25']*100:.0f}%."),
-            ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%."),
+            ("Under 5.5", f"Under 5.5 ≈ {r['u55']*100:.0f}%."),
+            ("Over 1.5", f"Over 1.5 ≈ {r['o15']*100:.0f}%."),
         ]
-
-    btts_yes = r["btts_yes"]
-    if btts_yes >= 0.62:
-        alt.append(("Goal (BTTS Sì)", f"BTTS Sì ≈ {btts_yes*100:.0f}%."))
-    elif btts_yes <= 0.40:
-        alt.append(("No Goal (BTTS No)", "No Goal più coerente."))
     else:
-        alt.append(("Goal/NoGoal", "Zona media, da leggere con attenzione."))
+        primary = ("Over 1.5", f"Mercato prudente: Over 1.5 ≈ {r['o15']*100:.0f}%.")
+        alt = [
+            ("Under 4.5", f"Under 4.5 ≈ {r['u45']*100:.0f}%."),
+            ("Under 5.5", f"Under 5.5 ≈ {r['u55']*100:.0f}%."),
+        ]
 
     ppg_h = home_sum.get("ppg", 0.0)
     ppg_a = away_sum.get("ppg", 0.0)
     diff = ppg_h - ppg_a
 
-    if diff >= 0.55:
+    if diff >= 0.50:
         outcome = ("1X", f"Casa più in forma: PPG {ppg_h:.2f} vs {ppg_a:.2f}.")
-    elif diff <= -0.55:
+    elif diff <= -0.50:
         outcome = ("X2", f"Trasferta più in forma: PPG {ppg_a:.2f} vs {ppg_h:.2f}.")
     else:
         outcome = ("12", f"PPG simili ({ppg_h:.2f} vs {ppg_a:.2f}).")
@@ -934,7 +928,7 @@ def recommend_for_match(home_sum: Dict[str, Any], away_sum: Dict[str, Any]) -> D
 
 
 # =========================================================
-# VALUE ENGINE
+# VALUE ENGINE PRUDENTE
 # =========================================================
 
 def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
@@ -968,26 +962,27 @@ def market_probability_map(rec: Dict[str, Any]) -> Dict[str, float]:
 
 
 MARKET_PROFILES = {
-    "1": {"min_prob": 0.52, "min_odd": 1.35, "max_odd": 3.10, "target_odd": 1.85, "stability": 0.78},
-    "X": {"min_prob": 0.28, "min_odd": 2.90, "max_odd": 4.60, "target_odd": 3.40, "stability": 0.40},
-    "2": {"min_prob": 0.52, "min_odd": 1.35, "max_odd": 3.10, "target_odd": 1.85, "stability": 0.78},
+    # Prudente
+    "1X": {"min_prob": 0.72, "min_odd": 1.18, "max_odd": 1.72, "target_odd": 1.38, "weight": 1.28, "family": "safe"},
+    "X2": {"min_prob": 0.72, "min_odd": 1.18, "max_odd": 1.72, "target_odd": 1.38, "weight": 1.28, "family": "safe"},
+    "Over 1.5": {"min_prob": 0.74, "min_odd": 1.15, "max_odd": 1.60, "target_odd": 1.34, "weight": 1.35, "family": "safe"},
+    "Under 5.5": {"min_prob": 0.82, "min_odd": 1.05, "max_odd": 1.38, "target_odd": 1.18, "weight": 1.33, "family": "safe"},
+    "Under 4.5": {"min_prob": 0.74, "min_odd": 1.15, "max_odd": 1.72, "target_odd": 1.38, "weight": 1.30, "family": "safe"},
 
-    "1X": {"min_prob": 0.72, "min_odd": 1.18, "max_odd": 1.95, "target_odd": 1.42, "stability": 0.95},
-    "X2": {"min_prob": 0.72, "min_odd": 1.18, "max_odd": 1.95, "target_odd": 1.42, "stability": 0.95},
-    "12": {"min_prob": 0.68, "min_odd": 1.20, "max_odd": 1.95, "target_odd": 1.38, "stability": 0.70},
+    # Media
+    "1": {"min_prob": 0.58, "min_odd": 1.45, "max_odd": 2.45, "target_odd": 1.82, "weight": 1.00, "family": "medium"},
+    "2": {"min_prob": 0.58, "min_odd": 1.45, "max_odd": 2.45, "target_odd": 1.82, "weight": 1.00, "family": "medium"},
+    "12": {"min_prob": 0.66, "min_odd": 1.18, "max_odd": 1.75, "target_odd": 1.36, "weight": 0.95, "family": "medium"},
+    "Under 3.5": {"min_prob": 0.64, "min_odd": 1.25, "max_odd": 2.05, "target_odd": 1.58, "weight": 0.98, "family": "medium"},
+    "Over 2.5": {"min_prob": 0.60, "min_odd": 1.55, "max_odd": 2.15, "target_odd": 1.82, "weight": 0.95, "family": "medium"},
+    "Goal (BTTS Sì)": {"min_prob": 0.58, "min_odd": 1.55, "max_odd": 2.10, "target_odd": 1.78, "weight": 0.90, "family": "medium"},
+    "No Goal (BTTS No)": {"min_prob": 0.58, "min_odd": 1.55, "max_odd": 2.10, "target_odd": 1.78, "weight": 0.90, "family": "medium"},
 
-    "Over 1.5": {"min_prob": 0.72, "min_odd": 1.18, "max_odd": 1.90, "target_odd": 1.42, "stability": 1.00},
-    "Over 2.5": {"min_prob": 0.56, "min_odd": 1.45, "max_odd": 2.35, "target_odd": 1.82, "stability": 0.86},
-    "Over 3.5": {"min_prob": 0.42, "min_odd": 1.85, "max_odd": 3.20, "target_odd": 2.35, "stability": 0.62},
-    "Over 4.5": {"min_prob": 0.28, "min_odd": 2.40, "max_odd": 5.00, "target_odd": 3.50, "stability": 0.35},
-    "Over 5.5": {"min_prob": 0.18, "min_odd": 3.40, "max_odd": 7.00, "target_odd": 4.60, "stability": 0.18},
-
-    "Under 3.5": {"min_prob": 0.62, "min_odd": 1.28, "max_odd": 2.30, "target_odd": 1.68, "stability": 0.92},
-    "Under 4.5": {"min_prob": 0.76, "min_odd": 1.15, "max_odd": 1.85, "target_odd": 1.38, "stability": 1.00},
-    "Under 5.5": {"min_prob": 0.84, "min_odd": 1.08, "max_odd": 1.55, "target_odd": 1.22, "stability": 0.96},
-
-    "Goal (BTTS Sì)": {"min_prob": 0.56, "min_odd": 1.45, "max_odd": 2.30, "target_odd": 1.78, "stability": 0.78},
-    "No Goal (BTTS No)": {"min_prob": 0.56, "min_odd": 1.45, "max_odd": 2.30, "target_odd": 1.78, "stability": 0.78},
+    # Aggressiva
+    "X": {"min_prob": 0.33, "min_odd": 2.90, "max_odd": 4.10, "target_odd": 3.30, "weight": 0.45, "family": "aggressive"},
+    "Over 3.5": {"min_prob": 0.45, "min_odd": 1.90, "max_odd": 2.90, "target_odd": 2.25, "weight": 0.45, "family": "aggressive"},
+    "Over 4.5": {"min_prob": 0.28, "min_odd": 2.40, "max_odd": 4.80, "target_odd": 3.20, "weight": 0.25, "family": "aggressive"},
+    "Over 5.5": {"min_prob": 0.18, "min_odd": 3.40, "max_odd": 7.00, "target_odd": 4.60, "weight": 0.10, "family": "aggressive"},
 }
 
 
@@ -1003,9 +998,9 @@ def get_match_context(prob_map: Dict[str, float]) -> Dict[str, Any]:
     else:
         side = "balanced"
 
-    if prob_map.get("Over 2.5", 0.0) >= 0.62:
+    if prob_map.get("Over 2.5", 0.0) >= 0.64:
         goals_profile = "high"
-    elif prob_map.get("Under 4.5", 0.0) >= 0.82 and prob_map.get("Under 3.5", 0.0) >= 0.58:
+    elif prob_map.get("Under 4.5", 0.0) >= 0.78:
         goals_profile = "low"
     else:
         goals_profile = "mid"
@@ -1013,9 +1008,6 @@ def get_match_context(prob_map: Dict[str, float]) -> Dict[str, Any]:
     return {
         "side": side,
         "goals_profile": goals_profile,
-        "p1": p1,
-        "px": px,
-        "p2": p2,
     }
 
 
@@ -1025,35 +1017,52 @@ def context_bonus_for_market(market: str, ctx: Dict[str, Any]) -> float:
     goals_profile = ctx["goals_profile"]
 
     if side == "home":
-        if market in {"1", "1X"}:
+        if market in {"1X", "1"}:
             bonus += 10.0
-        if market in {"2", "X2"}:
-            bonus -= 10.0
+        if market in {"X2", "2"}:
+            bonus -= 12.0
         if market == "X":
-            bonus -= 4.0
+            bonus -= 8.0
+
     elif side == "away":
-        if market in {"2", "X2"}:
+        if market in {"X2", "2"}:
             bonus += 10.0
-        if market in {"1", "1X"}:
-            bonus -= 10.0
+        if market in {"1X", "1"}:
+            bonus -= 12.0
         if market == "X":
-            bonus -= 4.0
+            bonus -= 8.0
+
     else:
-        if market in {"X", "12", "Under 3.5"}:
-            bonus += 6.0
+        if market in {"12", "Under 3.5"}:
+            bonus += 5.0
+        if market in {"1", "2"}:
+            bonus -= 3.0
 
     if goals_profile == "high":
         if market in {"Over 1.5", "Over 2.5", "Goal (BTTS Sì)"}:
             bonus += 8.0
-        if market in {"Under 3.5", "Under 4.5", "No Goal (BTTS No)"}:
-            bonus -= 6.0
+        if market in {"Under 4.5", "Under 5.5"}:
+            bonus += 2.0
+        if market in {"No Goal (BTTS No)", "Under 3.5"}:
+            bonus -= 7.0
+
     elif goals_profile == "low":
-        if market in {"Under 3.5", "Under 4.5", "Under 5.5", "No Goal (BTTS No)"}:
+        if market in {"Under 5.5", "Under 4.5", "Under 3.5", "No Goal (BTTS No)"}:
             bonus += 8.0
-        if market in {"Over 3.5", "Over 4.5", "Over 5.5"}:
-            bonus -= 10.0
+        if market in {"Over 2.5", "Over 3.5", "Over 4.5", "Over 5.5"}:
+            bonus -= 12.0
+        if market == "Goal (BTTS Sì)":
+            bonus -= 8.0
 
     return bonus
+
+
+def family_bonus(profile_family: str) -> float:
+    if profile_family == "safe":
+        return 16.0
+    if profile_family == "medium":
+        return 4.0
+    return -20.0
 
 
 def score_market_candidate(market: str, prob: float, odd: float, prob_map: Dict[str, float], relaxed: bool = False) -> Optional[float]:
@@ -1061,62 +1070,61 @@ def score_market_candidate(market: str, prob: float, odd: float, prob_map: Dict[
     if not profile:
         return None
 
-    min_prob = profile["min_prob"] - (0.05 if relaxed else 0.0)
-    max_odd = profile["max_odd"] + (0.50 if relaxed else 0.0)
+    min_prob = profile["min_prob"] - (0.03 if relaxed else 0.0)
+    max_odd = profile["max_odd"] + (0.20 if relaxed else 0.0)
     min_odd = profile["min_odd"]
     target_odd = profile["target_odd"]
-    stability = profile["stability"]
+    weight = profile["weight"]
+    family = profile["family"]
 
     if prob < min_prob:
         return None
     if odd < min_odd or odd > max_odd:
         return None
 
+    # Quello che conta di più: probabilità reale
+    prob_score = prob * 100.0 * weight
+
+    # Piccolo premio alla quota, ma molto meno di prima
     edge = prob * odd
-    min_edge = 0.88 if relaxed else 0.93
+    min_edge = 0.95 if family == "safe" else 0.97
     if edge < min_edge:
         return None
 
-    prob_score = prob * 100.0 * stability
-    edge_bonus = max(0.0, edge - 1.0) * 32.0
+    edge_bonus = max(0.0, edge - 1.0) * (10.0 if family == "safe" else 8.0)
 
     odds_span = max_odd - min_odd
     if odds_span <= 0:
         target_bonus = 0.0
     else:
-        target_bonus = max(0.0, 1.0 - abs(odd - target_odd) / odds_span) * 10.0
+        target_bonus = max(0.0, 1.0 - abs(odd - target_odd) / odds_span) * 6.0
 
     ctx = get_match_context(prob_map)
     ctx_bonus = context_bonus_for_market(market, ctx)
+    fam_bonus = family_bonus(family)
 
+    # Penalità forti ai longshot
     longshot_penalty = 0.0
-    if odd >= 5.5:
+    if odd >= 4.0:
         longshot_penalty += 18.0
-    elif odd >= 4.2:
+    elif odd >= 3.2:
         longshot_penalty += 10.0
-    elif odd >= 3.4:
+    elif odd >= 2.7:
         longshot_penalty += 4.0
 
-    if market == "X":
-        longshot_penalty += 5.0
+    # Penalità extra ai mercati aggressivi
+    if family == "aggressive":
+        longshot_penalty += 10.0
 
-    final_score = prob_score + edge_bonus + target_bonus + ctx_bonus - longshot_penalty
+    final_score = prob_score + edge_bonus + target_bonus + ctx_bonus + fam_bonus - longshot_penalty
     return final_score
 
 
 def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) -> List[Dict[str, Any]]:
     rows = []
 
-    allowed_markets = {
-        "1", "X", "2",
-        "1X", "X2", "12",
-        "Over 1.5", "Over 2.5", "Over 3.5", "Over 4.5", "Over 5.5",
-        "Under 3.5", "Under 4.5", "Under 5.5",
-        "Goal (BTTS Sì)", "No Goal (BTTS No)"
-    }
-
     for market, prob in prob_map.items():
-        if market not in allowed_markets:
+        if market not in MARKET_PROFILES:
             continue
 
         odd = odds_map.get(market)
@@ -1140,7 +1148,7 @@ def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) ->
 
     if not rows:
         for market, prob in prob_map.items():
-            if market not in allowed_markets:
+            if market not in MARKET_PROFILES:
                 continue
 
             odd = odds_map.get(market)
@@ -1168,16 +1176,54 @@ def build_value_table(prob_map: Dict[str, float], odds_map: Dict[str, float]) ->
 
 def build_model_only_table(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     prob_map = market_probability_map(rec)
-
     rows = []
-    for market, prob in prob_map.items():
-        bonus = 0.0
-        if market in {"Over 1.5", "Under 4.5", "Under 5.5", "1X", "X2"}:
-            bonus += 8.0
-        elif market in {"Under 3.5", "Over 2.5", "Goal (BTTS Sì)", "No Goal (BTTS No)", "1", "2"}:
-            bonus += 4.0
 
-        value_idx = prob * 100.0 + bonus
+    safe_priority = {
+        "Over 1.5": 14.0,
+        "Under 5.5": 13.0,
+        "Under 4.5": 12.0,
+        "1X": 11.0,
+        "X2": 11.0,
+        "Under 3.5": 6.0,
+        "Over 2.5": 5.0,
+        "1": 3.0,
+        "2": 3.0,
+        "12": 2.0,
+        "Goal (BTTS Sì)": 1.0,
+        "No Goal (BTTS No)": 1.0,
+        "X": -20.0,
+        "Over 3.5": -12.0,
+        "Over 4.5": -20.0,
+        "Over 5.5": -30.0,
+    }
+
+    for market, prob in prob_map.items():
+        if market not in MARKET_PROFILES:
+            continue
+
+        # Soglie severe anche senza quote
+        base_thresholds = {
+            "1X": 0.74,
+            "X2": 0.74,
+            "Over 1.5": 0.76,
+            "Under 5.5": 0.84,
+            "Under 4.5": 0.76,
+            "1": 0.60,
+            "2": 0.60,
+            "12": 0.68,
+            "Under 3.5": 0.66,
+            "Over 2.5": 0.61,
+            "Goal (BTTS Sì)": 0.60,
+            "No Goal (BTTS No)": 0.60,
+            "X": 0.34,
+            "Over 3.5": 0.46,
+            "Over 4.5": 0.30,
+            "Over 5.5": 0.20,
+        }
+        if prob < base_thresholds.get(market, 0.99):
+            continue
+
+        value_idx = prob * 100.0 + safe_priority.get(market, 0.0)
 
         rows.append(
             {
@@ -1202,15 +1248,15 @@ def pick_best_single(table: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 def signal_badge(x: float, source: str) -> str:
     if source == "quota":
-        if x >= 78:
-            return "🔵 Molto buona"
-        if x >= 68:
+        if x >= 95:
+            return "🔵 Molto solida"
+        if x >= 82:
             return "🟣 Buona"
-        return "🟠 Da valutare"
+        return "🟠 Accettabile"
     else:
-        if x >= 72:
+        if x >= 92:
             return "🔵 Forte dal modello"
-        if x >= 60:
+        if x >= 82:
             return "🟣 Buona dal modello"
         return "🟠 Debole dal modello"
 
@@ -1385,7 +1431,7 @@ def make_stop_plan(back_stake: float, back_odds: float, comm_pct: float, max_los
 # UI
 # =========================================================
 
-st.set_page_config(page_title="Trading Tool PRO (Calcio) — Analisi + Quote + Value", layout="wide")
+st.set_page_config(page_title="Trading Tool PRO (Calcio) — Prudente", layout="wide")
 
 st.markdown(
     """
@@ -1413,8 +1459,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("⚽ Trading Tool PRO (Calcio) — Analisi + Quote + Value")
-st.caption("Analisi su dati recenti, forma e quote disponibili. Non è una previsione certa.")
+st.title("⚽ Trading Tool PRO (Calcio) — Versione Prudente")
+st.caption("Priorità a giocate più fattibili: 1X, X2, Over 1.5, Under 5.5, Under 4.5.")
 
 secrets_keys = dict(st.secrets) if hasattr(st, "secrets") else {}
 api_football_key = secrets_keys.get("API_FOOTBALL_KEY", "")
@@ -1438,7 +1484,7 @@ if not api_football_key:
     st.stop()
 
 if not odds_api_key:
-    st.warning("ODDS_API_KEY non trovata. L'app funzionerà, ma le quote useranno il fallback del modello.")
+    st.warning("ODDS_API_KEY non trovata. L'app userà il fallback del modello quando serve.")
 
 tabs = st.tabs(["📊 Analisi partita (PRO)", "🧮 Trading / Stop (Manuale)"])
 
@@ -1496,12 +1542,12 @@ def render_analysis(res: Dict[str, Any]):
 
     if best_single:
         source = best_single.get("source", "modello")
-        idx_label = "Indice valore" if source == "quota" else "Forza modello"
+        idx_label = "Indice prudente" if source == "quota" else "Forza modello"
         odd_text = f" @ {best_single['odd']:.2f}" if best_single.get("odd") else ""
         st.markdown(
             f"""
 <div class="card">
-<b>✅ Miglior giocata:</b> <span class="badge">{best_single['risk']}</span><br/>
+<b>✅ Giocata consigliata:</b> <span class="badge">{best_single['risk']}</span><br/>
 <h3>{best_single['market']}{odd_text}</h3>
 <span class="small-muted"><b>Probabilità:</b> {best_single['prob']*100:.0f}% · <b>{idx_label}:</b> {best_single['value_idx']:.2f} · {signal_badge(float(best_single['value_idx']), source)}</span><br/>
 <span class="small-muted"><b>Origine:</b> {source}</span>
@@ -1510,7 +1556,7 @@ def render_analysis(res: Dict[str, Any]):
             unsafe_allow_html=True,
         )
 
-    st.markdown("## 1️⃣X️⃣2️⃣")
+    st.markdown("## 1️⃣X️⃣2️⃣ stimati")
     probs_1x2 = rec["outright"]["probs"]
     k1, kx, k2 = st.columns(3)
     with k1:
